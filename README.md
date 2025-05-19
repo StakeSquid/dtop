@@ -10,6 +10,12 @@ A high-performance, interactive Terminal User Interface (TUI) for managing Docke
 * **Resizable Columns:** Dynamic column widths adjustable via mouse drag.
 * **Persistent Configuration:** Saves user preferences (such as column layout) across sessions.
 
+## Screenshots
+<img width="2168" alt="Screenshot 2025-05-19 at 10 56 46 PM" src="https://github.com/user-attachments/assets/1fabacfa-ff14-4792-9997-55d22f06f8f2" />
+<img width="385" alt="Screenshot 2025-05-19 at 10 57 02 PM" src="https://github.com/user-attachments/assets/bd436854-c6b4-4bbe-898f-fd7b37f179e6" />
+<img width="2168" alt="Screenshot 2025-05-19 at 10 57 11 PM" src="https://github.com/user-attachments/assets/32ee2625-9390-43fe-ad59-1fac6bd93d12" />
+
+
 ## Dependencies
 
 Ensure you have Python 3.8+ installed and Docker daemon running.
