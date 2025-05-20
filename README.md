@@ -66,6 +66,153 @@ Run the application:
 
 The application will connect to your local Docker daemon and display all containers.
 
+# Installing Docker TUI as a System Command
+
+There are two main ways to install the Docker TUI application as a system command that can be run from anywhere:
+
+## Option 1: Using the Installer Script (Recommended)
+
+The included installer script will:
+- Copy all necessary files to `/usr/local/bin`
+- Make them executable
+- Create a simple command `dtop` to launch the application from anywhere
+
+### Installation Steps
+
+1. Make the installer script executable:
+
+```bash
+chmod +x install.sh
+```
+
+2. Run the installer with sudo:
+
+```bash
+sudo ./install.sh
+```
+
+3. Once installed, you can run Docker TUI from anywhere by simply typing:
+
+```bash
+dtop
+```
+
+### Uninstallation
+
+To uninstall Docker TUI, use the included uninstaller script:
+
+```bash
+chmod +x uninstall.sh
+sudo ./uninstall.sh
+```
+
+## Option 2: Manual Installation
+
+If you prefer to install manually, follow these steps:
+
+1. Create a directory for Docker TUI in `/usr/local/bin`:
+
+```bash
+sudo mkdir -p /usr/local/bin/docker-tui
+```
+
+2. Copy all required files to the installation directory:
+
+```bash
+sudo cp main.py docker_tui.py log_view.py container_actions.py \
+       stats.py config.py utils.py normalize_logs.py \
+       /usr/local/bin/docker-tui/
+```
+
+3. Make all Python files executable:
+
+```bash
+sudo chmod +x /usr/local/bin/docker-tui/*.py
+```
+
+4. Create a launcher script:
+
+```bash
+sudo tee /usr/local/bin/dtop > /dev/null << 'EOF'
+#!/bin/bash
+exec python3 /usr/local/bin/docker-tui/main.py "$@"
+EOF
+```
+
+5. Make the launcher executable:
+
+```bash
+sudo chmod +x /usr/local/bin/dtop
+```
+
+6. Test the installation by running:
+
+```bash
+dtop
+```
+
+### Manual Uninstallation
+
+To uninstall manually:
+
+```bash
+sudo rm -rf /usr/local/bin/docker-tui /usr/local/bin/dtop
+```
+
+## Configuration File
+
+Regardless of installation method, the configuration file will be stored at:
+
+```
+~/.docker_tui.json
+```
+
+This file contains your saved column settings and preferences. It will be created automatically when you first run the application.
+
+## Dependencies
+
+The installer script automatically checks for and installs the Docker Python package. If you're installing manually, make sure to install it:
+
+```bash
+pip install docker
+```
+
+## Troubleshooting
+
+### "Command not found" Error
+
+If you get a "command not found" error after installation:
+
+1. Make sure `/usr/local/bin` is in your PATH:
+   ```bash
+   echo $PATH
+   ```
+
+2. If it's not, add it to your shell configuration file:
+   ```bash
+   echo 'export PATH=$PATH:/usr/local/bin' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+### Permission Issues
+
+If you encounter permission issues:
+
+```bash
+sudo chown -R root:root /usr/local/bin/docker-tui
+sudo chmod -R 755 /usr/local/bin/docker-tui
+```
+
+### Docker Connection Issues
+
+Ensure your user is in the docker group:
+
+```bash
+sudo usermod -aG docker $USER
+# Log out and back in, or run:
+newgrp docker
+```
+
 ## Keyboard Controls
 
 ### Main Container View
