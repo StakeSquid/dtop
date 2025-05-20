@@ -40,8 +40,8 @@ A high-performance, interactive Terminal User Interface (TUI) for managing Docke
 1. Clone the repository or download the source files:
 
 ```bash
-git clone https://github.com/yourusername/docker-tui.git
-cd docker-tui
+git clone https://github.com/StakeSquid/dtop
+cd dtop
 ```
 
 2. Install the required Python dependency:
