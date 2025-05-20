@@ -1,144 +1,239 @@
-# dtop
+# Docker TUI
 
-A high-performance, interactive Terminal User Interface (TUI) for managing Docker containers, featuring real-time container monitoring, responsive interactions, dynamic resizing, detailed logs, and customizable configurations.
+A high-performance, interactive Terminal User Interface (TUI) for managing Docker containers with real-time monitoring, responsive interactions, and powerful log management capabilities.
 
 ## Features
 
-* **Real-time Container Monitoring:** Fast and efficient parallel fetching of CPU, memory, network, and status data for containers.
-* **Interactive Controls:** Navigate and manage containers easily with keyboard shortcuts and mouse support.
-* **Detailed Log Viewer:** Reliable log display with normalization, line wrapping, and follow mode.
-* **Resizable Columns:** Dynamic column widths adjustable via mouse drag.
-* **Persistent Configuration:** Saves user preferences (such as column layout) across sessions.
+- **Real-time Container Monitoring**: View live CPU, memory, and network statistics for all running containers with fast parallel data collection
+- **Interactive Controls**: Navigate containers and perform actions using keyboard shortcuts or mouse
+- **Advanced Log Viewer**: 
+  - Log normalization for consistent formatting across different container types
+  - Text search with highlighted results
+  - Log filtering (grep-like functionality)
+  - Line wrapping toggle for viewing long log lines
+  - Follow mode for real-time log updates
+- **Customizable Interface**:
+  - Resizable columns with persistent configuration
+  - Dynamic layout that adapts to terminal size
+- **Container Management**:
+  - Start/stop containers
+  - Pause/unpause containers
+  - Restart containers
+  - Execute interactive shells
+  - View detailed logs
+  - Recreate containers
 
 ## Screenshots
-<img width="2168" alt="Screenshot 2025-05-19 at 10 56 46 PM" src="https://github.com/user-attachments/assets/1fabacfa-ff14-4792-9997-55d22f06f8f2" />
-<img width="385" alt="Screenshot 2025-05-19 at 10 57 02 PM" src="https://github.com/user-attachments/assets/bd436854-c6b4-4bbe-898f-fd7b37f179e6" />
-<img width="2168" alt="Screenshot 2025-05-19 at 10 57 11 PM" src="https://github.com/user-attachments/assets/32ee2625-9390-43fe-ad59-1fac6bd93d12" />
 
+<img width="2168" alt="Container list view showing stats for multiple containers" src="https://github.com/user-attachments/assets/1fabacfa-ff14-4792-9997-55d22f06f8f2" />
+<img width="385" alt="Container action menu with available operations" src="https://github.com/user-attachments/assets/bd436854-c6b4-4bbe-898f-fd7b37f179e6" />
+<img width="2168" alt="Log viewer with normalized logs and search functionality" src="https://github.com/user-attachments/assets/32ee2625-9390-43fe-ad59-1fac6bd93d12" />
 
-## Dependencies
+## Prerequisites
 
-Ensure you have Python 3.8+ installed and Docker daemon running.
+- Python 3.8 or higher
+- Docker daemon running and accessible
+- Terminal with support for mouse events and colors
 
-### Python Dependencies:
+## Installation
+
+1. Clone the repository or download the source files:
+
+```bash
+git clone https://github.com/yourusername/docker-tui.git
+cd docker-tui
+```
+
+2. Install the required Python dependency:
 
 ```bash
 pip install docker
 ```
 
-## Installation
-
-1. Save the main application script as `docker_tui.py` and ensure it's executable:
+3. Make the main script and log normalizer executable:
 
 ```bash
-chmod +x docker_tui.py
+chmod +x main.py normalize_logs.py
 ```
 
-2. Save the log normalization script as `normalize_logs.py` in the same directory and make it executable:
+## Quick Start
+
+Run the application:
 
 ```bash
-chmod +x normalize_logs.py
+./main.py
 ```
 
-## Running the Application
+The application will connect to your local Docker daemon and display all containers.
 
-Execute the Docker TUI application directly from the terminal:
+## Keyboard Controls
 
-```bash
-./docker_tui.py
-```
+### Main Container View
 
-## Usage
-
-### Main Interface Controls
-
-* **Navigation:**
-
-  * `↑` / `↓` or **Mouse Click**: Navigate through container list.
-* **Container Actions:**
-
-  * `Enter` / **Mouse Click**: Open container action menu.
-  * `L`: View container logs.
-* **Logs View Toggles:**
-
-  * `F`: Toggle log follow mode (real-time updates).
-  * `N`: Toggle log normalization.
-  * `W`: Toggle log line wrapping.
-* **Interface:**
-
-  * **Mouse Drag**: Resize column widths.
-  * `Q`: Quit the application.
+| Key | Function |
+|-----|----------|
+| ↑/↓ | Navigate through container list |
+| Enter | Show action menu for selected container |
+| L | View logs for selected container |
+| F | Toggle log follow mode |
+| N | Toggle log normalization |
+| W | Toggle log line wrapping |
+| Click | Select container or interact with interface |
+| Q | Quit application |
 
 ### Container Action Menu
 
-When a container is selected, pressing `Enter` or clicking it opens an action menu:
+| Key | Function |
+|-----|----------|
+| ↑/↓ | Navigate menu options |
+| Enter | Select action |
+| L | View logs |
+| S | Start/Stop container |
+| P | Pause/Unpause container |
+| R | Restart container |
+| F | Force recreate container |
+| E | Execute interactive shell |
+| C or ESC | Cancel/close menu |
 
-* **Logs**: View detailed container logs.
-* **Start/Stop**: Start or stop the selected container.
-* **Pause/Unpause**: Temporarily pause or resume container execution.
-* **Restart**: Restart the selected container.
-* **Recreate**: Remove and recreate the container based on the original image.
-* **Exec Shell**: Launch an interactive shell (`/bin/bash`) inside the running container.
-* **Cancel**: Exit the menu without action.
+### Log Viewer
 
-### Log Viewer Controls
+| Key | Function |
+|-----|----------|
+| ↑/↓ | Scroll logs vertically |
+| PgUp/PgDn | Page up/down through logs |
+| Home/g | Go to beginning of logs |
+| End/G | Go to end of logs |
+| ←/→ | Scroll logs horizontally (when wrapping disabled) |
+| / | Search in logs |
+| \\ | Filter logs (grep-like functionality) |
+| n | Next search result |
+| N | Previous search result |
+| F | Toggle follow mode |
+| N | Toggle log normalization |
+| W | Toggle line wrapping |
+| ESC/Q | Return to container list |
 
-* **Navigation:**
+### Search/Filter Mode
 
-  * `↑` / `↓`: Scroll through logs.
-  * `PgUp` / `PgDn`: Scroll pages.
-  * `Home` / `End`: Go to start or end of logs.
-* **Horizontal Scroll (unwrapped logs only):**
+| Key | Function |
+|-----|----------|
+| Enter | Apply search/filter |
+| Tab | Toggle case sensitivity |
+| ESC | Exit search/filter mode |
+| Backspace | Delete character |
 
-  * `←` / `→`: Scroll horizontally.
-* **View Toggles:**
+## Mouse Support
 
-  * `F`: Toggle follow mode.
-  * `N`: Toggle normalization.
-  * `W`: Toggle line wrapping.
-* **Exit Logs:**
+The application supports comprehensive mouse interaction:
 
-  * `ESC` / `Q`: Return to main container list.
+- **Click** on a container to select it
+- **Double-click** a container to open its action menu
+- **Wheel** to scroll through containers or logs
+- **Click** on menu items to select them
+- **Click** on the scrollbar to jump to a position
+
+## Log Normalization
+
+The application includes a powerful log normalization feature (`normalize_logs.py`) that standardizes different log formats for better readability:
+
+- Formats timestamps consistently (`MM-DD|HH:MM:SS.mmm`)
+- Removes ANSI color codes
+- Structures JSON logs with consistent field ordering
+- Normalizes key-value style logs
+- Handles various log formats (Geth-style, IndexerAgent-style, Walrus-style, etc.)
 
 ## Configuration
 
-Configuration settings, such as column widths and visibility, are automatically saved to the user's home directory:
+The application automatically saves your column configuration to `~/.docker_tui.json`. This includes column widths, visibility, and other display preferences.
 
-```
-~/.docker_tui.json
-```
+Default columns include:
+- NAME
+- IMAGE
+- STATUS
+- CPU%
+- MEM%
+- NET I/O
+- CREATED AT
+- UPTIME
 
-Modify this file directly to adjust default settings or simply resize columns within the application interface.
+## Component Architecture
 
-## Log Normalization (`normalize_logs.py`)
+The application is structured with the following modules:
 
-This script processes various Docker log formats, removing ANSI color codes, formatting timestamps, and structuring logs for improved readability.
+- `main.py` - Entry point and launcher
+- `docker_tui.py` - Core TUI implementation
+- `log_view.py` - Log viewer functionality
+- `container_actions.py` - Container action menu and operations
+- `stats.py` - Container statistics collection
+- `config.py` - Configuration management
+- `utils.py` - Utility functions
+- `normalize_logs.py` - Log normalization script
 
-* **Supported Log Formats:**
+## Advanced Usage
 
-  * JSON-based logs from common Dockerized services (e.g., Geth, IndexerAgent, Walrus).
-  * Key-value structured logs.
+### Column Customization
+
+The application supports dynamic column resizing. The configuration is saved automatically and persists between sessions.
+
+### Log Filtering Example
+
+When viewing logs, press `\` to enter filter mode:
+1. Type your filter text (e.g., `error`)
+2. Press Tab to toggle case sensitivity if needed
+3. Press Enter to apply the filter
+4. Only matching lines will be displayed
+5. To clear the filter, press `\` again and press Enter with an empty filter
+
+### Log Searching Example
+
+When viewing logs, press `/` to enter search mode:
+1. Type your search term (e.g., `connection`)
+2. Press Enter to search
+3. Use `n` and `N` to navigate between matches
+4. Matches will be highlighted in the logs
+5. To clear search, press `/` again and press Enter with an empty search term
 
 ## Troubleshooting
 
-* **Docker Daemon Errors:**
-  If the application fails to connect to Docker, ensure your user has permissions for Docker socket (`/var/run/docker.sock`).
+### Screen Display Issues
 
-  ```bash
-  sudo usermod -aG docker $USER
-  newgrp docker
-  ```
-* **Terminal Display Issues:**
-  If your terminal behaves strangely after exiting:
+If your terminal displays incorrectly after exiting the application:
 
-  ```bash
-  reset
-  ```
+```bash
+reset
+```
+
+### Docker Connection Issues
+
+Ensure your user has permissions to access the Docker socket:
+
+```bash
+sudo usermod -aG docker $USER
+# Then log out and back in, or run:
+newgrp docker
+```
+
+### Log Normalization Not Working
+
+If log normalization doesn't work:
+
+1. Ensure `normalize_logs.py` is executable:
+   ```bash
+   chmod +x normalize_logs.py
+   ```
+2. Verify it's in the same directory as the main application
+3. Check for any error messages at the top of the log view
 
 ## License
 
-MIT License
+This project is licensed under the MIT License - see the LICENSE file for details.
 
----
+## Contributing
 
-Developed for efficient Docker container management directly from the terminal.
+Contributions are welcome! Feel free to submit issues or pull requests.
+
+## Acknowledgements
+
+- Built with Python and the curses library
+- Uses the Docker Python SDK for container interaction
+- Inspiration from tools like htop and Docker CLI
