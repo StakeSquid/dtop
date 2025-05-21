@@ -20,7 +20,7 @@ echo -e "${NC}"
 # Check if script is run with sudo/root
 if [ "$(id -u)" -ne 0 ]; then
     echo -e "${RED}Error: This script needs to be run with sudo or as root${NC}"
-    echo "Please run: sudo bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/yourusername/docker-tui/main/remote-install.sh)\""
+    echo "Please run: sudo bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/StakeSquid/dtop/refs/heads/main/install.sh)\""
     exit 1
 fi
 
