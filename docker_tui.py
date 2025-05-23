@@ -78,7 +78,7 @@ class DockerTUI:
         self.running = True
         self.fetch_lock = threading.Lock()
         self.last_container_fetch = 0
-        self.container_fetch_interval = 0.5  # seconds
+        self.container_fetch_interval = 1  # seconds
         
         # Stats cache
         self.stats_lock = threading.Lock()
