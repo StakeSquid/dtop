@@ -313,6 +313,10 @@ def show_logs(tui, stdscr, container):
         last_log_time = time.time()
         log_update_interval = 0.5  # seconds (faster updates)
         
+        # Track last log line to avoid duplicates
+        last_log_line = logs[-1] if logs else ""
+        last_log_count = len(logs)
+        
         # Create a pad for scrolling and get the metadata
         pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
         pad = pad_info['pad']
@@ -384,9 +388,9 @@ def show_logs(tui, stdscr, container):
         
         # Draw footer with help
         if tui.wrap_log_lines:
-            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\\\:Filter | ESC:Back "
+            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
         else:
-            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\\\:Filter | ESC:Back "
+            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
         
         stdscr.attron(curses.color_pair(6))
         safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -406,92 +410,115 @@ def show_logs(tui, stdscr, container):
             # Update logs in follow mode
             if follow_mode and current_time - last_log_time >= log_update_interval:
                 try:
-                    # Simpler timestamp handling to fix follow mode
-                    # Docker expects Unix timestamp in seconds
-                    unix_timestamp = int(time.time()) - 2  # Go back 2 seconds to avoid missing logs
+                    # Use tail to get only new logs since we last checked
+                    # This approach avoids duplicates by only getting logs we haven't seen
                     raw_new_logs = container.logs(
-                        tail=100,
-                        stream=False,  # Don't stream, just fetch once
-                        since=unix_timestamp
+                        tail=50,  # Reduced from 100 to minimize overlap
+                        stream=False
                     ).decode(errors='ignore').splitlines()
                     
                     if raw_new_logs:
-                        # Update raw_logs with new content for toggling
-                        all_raw_logs.extend(raw_new_logs)
+                        # Find where the new logs start (avoid duplicates)
+                        new_start_idx = 0
+                        if last_log_count > 0 and len(raw_new_logs) > last_log_count:
+                            # We have more logs than before, find the overlap
+                            for i in range(len(raw_new_logs) - last_log_count):
+                                if raw_new_logs[i:i+last_log_count] == all_raw_logs[-last_log_count:]:
+                                    new_start_idx = i + last_log_count
+                                    break
+                        elif last_log_line and raw_new_logs:
+                            # Find where the last log line appears in the new logs
+                            try:
+                                last_idx = raw_new_logs.index(last_log_line)
+                                new_start_idx = last_idx + 1
+                            except ValueError:
+                                # Last line not found, these must all be new
+                                new_start_idx = 0
                         
-                        # Process new logs through normalize_logs.py if normalization is on
-                        new_logs = normalize_container_logs(tui.normalize_logs, tui.normalize_logs_script, raw_new_logs) if tui.normalize_logs else raw_new_logs
+                        # Extract only truly new logs
+                        truly_new_logs = raw_new_logs[new_start_idx:] if new_start_idx < len(raw_new_logs) else []
                         
-                        # Add to original logs
-                        original_logs.extend(new_logs)
-                        
-                        # If filtering is active, apply filter to new logs
-                        if filtering_active:
-                            # Apply filter to all logs (original + new)
-                            filtered_logs, filtered_line_map = filter_logs(original_logs, filter_string, case_sensitive)
-                            logs = filtered_logs
+                        if truly_new_logs:
+                            # Update tracking variables
+                            last_log_line = raw_new_logs[-1]
+                            last_log_count = min(50, len(raw_new_logs))  # Track up to 50 lines
                             
-                            # Rebuild pad with filtered logs
-                            pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
-                            pad = pad_info['pad']
-                            line_positions = pad_info['line_positions']
-                            actual_lines_count = pad_info['actual_lines']
-                        else:
-                            # Add to current logs
-                            logs.extend(new_logs)
+                            # Update raw_logs with new content for toggling
+                            all_raw_logs.extend(truly_new_logs)
                             
-                            # Check if we need to resize the pad
-                            new_lines_estimate = len(new_logs)
-                            if tui.wrap_log_lines:
-                                # Estimate additional space needed for wrapping
-                                new_lines_estimate += sum(max(1, len(line) // (w-3)) for line in new_logs)
+                            # Process new logs through normalize_logs.py if normalization is on
+                            new_logs = normalize_container_logs(tui.normalize_logs, tui.normalize_logs_script, truly_new_logs) if tui.normalize_logs else truly_new_logs
+                            
+                            # Add to original logs
+                            original_logs.extend(new_logs)
+                            
+                            # If filtering is active, apply filter to new logs
+                            if filtering_active:
+                                # Apply filter to all logs (original + new)
+                                filtered_logs, filtered_line_map = filter_logs(original_logs, filter_string, case_sensitive)
+                                logs = filtered_logs
                                 
-                            if actual_lines_count + new_lines_estimate >= pad.getmaxyx()[0]:
-                                # Need a new pad - rebuild with all logs
+                                # Rebuild pad with filtered logs
                                 pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
                                 pad = pad_info['pad']
                                 line_positions = pad_info['line_positions']
                                 actual_lines_count = pad_info['actual_lines']
                             else:
-                                # Append new logs to existing pad
-                                current_line = actual_lines_count
-                                for i, line in enumerate(new_logs):
-                                    line_positions.append(current_line)
-                                    if tui.wrap_log_lines:
-                                        # Split the line into wrapped segments
-                                        remaining = line
-                                        while remaining:
-                                            segment = remaining[:w-3]
+                                # Add to current logs
+                                logs.extend(new_logs)
+                                
+                                # Check if we need to resize the pad
+                                new_lines_estimate = len(new_logs)
+                                if tui.wrap_log_lines:
+                                    # Estimate additional space needed for wrapping
+                                    new_lines_estimate += sum(max(1, len(line) // (w-3)) for line in new_logs)
+                                    
+                                if actual_lines_count + new_lines_estimate >= pad.getmaxyx()[0]:
+                                    # Need a new pad - rebuild with all logs
+                                    pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
+                                    pad = pad_info['pad']
+                                    line_positions = pad_info['line_positions']
+                                    actual_lines_count = pad_info['actual_lines']
+                                else:
+                                    # Append new logs to existing pad
+                                    current_line = actual_lines_count
+                                    for i, line in enumerate(new_logs):
+                                        line_positions.append(current_line)
+                                        if tui.wrap_log_lines:
+                                            # Split the line into wrapped segments
+                                            remaining = line
+                                            while remaining:
+                                                segment = remaining[:w-3]
+                                                try:
+                                                    pad.addstr(current_line, 0, segment)
+                                                except curses.error:
+                                                    pass
+                                                current_line += 1
+                                                remaining = remaining[w-3:]
+                                        else:
+                                            # No wrapping - just add the whole line
                                             try:
-                                                pad.addstr(current_line, 0, segment)
+                                                pad.addstr(current_line, 0, line)
                                             except curses.error:
                                                 pass
                                             current_line += 1
-                                            remaining = remaining[w-3:]
-                                    else:
-                                        # No wrapping - just add the whole line
-                                        try:
-                                            pad.addstr(current_line, 0, line)
-                                        except curses.error:
-                                            pass
-                                        current_line += 1
-                                
-                                # Update line counts
-                                actual_lines_count = current_line
-                        
-                        # Update line count
-                        last_logical_lines_count = len(logs)
-                        
-                        # Reapply search highlights if we have a search pattern
-                        if search_string:
-                            search_result = search_and_highlight(pad, logs, search_string, line_positions, w, case_sensitive, pos)
-                            search_matches = search_result['matches']
-                            current_match = search_result['current_match']
-                            highlight_search_matches(pad, line_positions, tui.wrap_log_lines, w, search_matches, current_match)
-                        
-                        # Auto-scroll to bottom in follow mode
-                        if follow_mode:
-                            pos = max(0, actual_lines_count - (h-4))
+                                    
+                                    # Update line counts
+                                    actual_lines_count = current_line
+                            
+                            # Update line count
+                            last_logical_lines_count = len(logs)
+                            
+                            # Reapply search highlights if we have a search pattern
+                            if search_string:
+                                search_result = search_and_highlight(pad, logs, search_string, line_positions, w, case_sensitive, pos)
+                                search_matches = search_result['matches']
+                                current_match = search_result['current_match']
+                                highlight_search_matches(pad, line_positions, tui.wrap_log_lines, w, search_matches, current_match)
+                            
+                            # Auto-scroll to bottom in follow mode
+                            if follow_mode:
+                                pos = max(0, actual_lines_count - (h-4))
                 except Exception:
                     pass  # Ignore errors in log fetching
                 
@@ -581,9 +608,9 @@ def show_logs(tui, stdscr, container):
                             
                             # Restore normal footer
                             if tui.wrap_log_lines:
-                                footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\\\:Filter | ESC:Back "
+                                footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
                             else:
-                                footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\\\:Filter | ESC:Back "
+                                footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
                             
                             stdscr.attron(curses.color_pair(6))
                             safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -1043,9 +1070,9 @@ def show_logs(tui, stdscr, container):
                         
                         # Update footer immediately to show horizontal scroll keys if unwrapped
                         if tui.wrap_log_lines:
-                            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\\\:Filter | ESC:Back "
+                            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
                         else:
-                            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\\\:Filter | ESC:Back "
+                            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
                         
                         stdscr.attron(curses.color_pair(6))
                         safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
