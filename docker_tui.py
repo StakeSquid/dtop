@@ -381,22 +381,33 @@ class DockerTUI:
         return positions
     
     def get_column_at_position(self, x, screen_width):
-        """Find which column contains the given x position"""
+        """Find which column contains the given x position - IMPROVED VERSION"""
         positions = self.get_column_positions(screen_width)
         
+        # Check each column's boundaries more precisely
         for i in range(len(self.columns)):
             if i < len(positions) - 1:
-                # Check if x is within this column's range
+                # Column starts at positions[i] and ends before positions[i+1]
                 start = positions[i]
-                end = positions[i + 1]
-                if self.show_column_separators and i < len(self.columns) - 1:
-                    end -= len(self.column_separator)
+                if i < len(self.columns) - 1 and self.show_column_separators:
+                    # End before the separator
+                    end = positions[i+1] - len(self.column_separator)
+                else:
+                    # Last column or no separators
+                    end = positions[i+1]
                 
-                if start <= x < end:
+                # More generous click detection - include separator area
+                if start <= x <= end + (len(self.column_separator) if self.show_column_separators else 0):
                     return i
         
-        # Check last column
-        if len(positions) > 0 and x >= positions[-1]:
+        # If no exact match, find closest column
+        if len(positions) > 1:
+            for i in range(len(self.columns)):
+                if i < len(positions) - 1:
+                    mid_point = (positions[i] + positions[i+1]) // 2
+                    if x < mid_point:
+                        return i
+            # If past all midpoints, return last column
             return len(self.columns) - 1
             
         return -1
@@ -509,17 +520,32 @@ class DockerTUI:
                         if self.selected < self.scroll_offset:
                             self.scroll_offset = self.selected
                         last_draw_time = 0  # Redraw immediately
-                    elif key == curses.KEY_NPAGE:  # Page Down
+                    elif key == curses.KEY_NPAGE:  # Page Down - FIXED: smaller increment
+                        page_size = 5  # Only move 5 lines instead of full screen
+                        self.selected = min(len(self.filtered_containers) - 1, self.selected + page_size)
+                        # Adjust scroll to keep selection visible
                         visible_rows = h - 3
-                        self.selected = min(len(self.filtered_containers) - 1, self.selected + visible_rows)
                         if self.selected >= self.scroll_offset + visible_rows:
                             self.scroll_offset = self.selected - visible_rows + 1
                         last_draw_time = 0
-                    elif key == curses.KEY_PPAGE:  # Page Up
-                        visible_rows = h - 3
-                        self.selected = max(0, self.selected - visible_rows)
+                    elif key == curses.KEY_PPAGE:  # Page Up - FIXED: smaller increment
+                        page_size = 5  # Only move 5 lines instead of full screen
+                        self.selected = max(0, self.selected - page_size)
+                        # Adjust scroll to keep selection visible
                         if self.selected < self.scroll_offset:
                             self.scroll_offset = self.selected
+                        last_draw_time = 0
+                    elif key == curses.KEY_HOME or key == ord('g'):  # NEW: Home key or 'g' - go to top
+                        self.selected = 0
+                        self.scroll_offset = 0
+                        last_draw_time = 0
+                    elif key == curses.KEY_END or key == ord('G'):  # NEW: End key or 'G' - go to bottom
+                        self.selected = max(0, len(self.filtered_containers) - 1)
+                        visible_rows = h - 3
+                        if len(self.filtered_containers) > visible_rows:
+                            self.scroll_offset = len(self.filtered_containers) - visible_rows
+                        else:
+                            self.scroll_offset = 0
                         last_draw_time = 0
                     elif key == ord('\\'):  # Start filter mode (backslash)
                         self.filter_mode = True
@@ -533,9 +559,9 @@ class DockerTUI:
                         try:
                             _, mx, my, _, button_state = curses.getmouse()
                             
-                            # Check if click was on header row
+                            # Check if click was on header row - IMPROVED SORTING
                             if my == 0 and button_state & curses.BUTTON1_CLICKED:
-                                # Find which column was clicked
+                                # Find which column was clicked with improved detection
                                 col_idx = self.get_column_at_position(mx, w)
                                 if col_idx >= 0:
                                     # Toggle sort
@@ -576,6 +602,10 @@ class DockerTUI:
                         # Import here to avoid circular imports
                         import log_view
                         log_view.show_logs(self, stdscr, self.filtered_containers[self.selected])
+                    elif key in (ord('i'), ord('I')) and self.filtered_containers:
+                        # NEW: Direct inspect shortcut
+                        from container_actions import show_inspect
+                        show_inspect(self, stdscr, self.filtered_containers[self.selected])
                     elif key in (ord('n'), ord('N')):
                         # Toggle normalization setting globally
                         self.normalize_logs = not self.normalize_logs
@@ -886,9 +916,9 @@ class DockerTUI:
                             if idx == self.selected:
                                 stdscr.attroff(curses.color_pair(1))
 
-                    # Draw footer with help text
+                    # Draw footer with help text - UPDATED with new shortcuts
                     stdscr.attron(curses.color_pair(6))
-                    footer_text = " ↑/↓/PgUp/PgDn:Navigate | Enter:Menu | L:Logs | \\:Filter | N:Normalize | W:Wrap | Q:Quit "
+                    footer_text = " ↑/↓:Navigate | PgUp/Dn:5 Lines | Home/End:Top/Bottom | Enter:Menu | L:Logs | I:Inspect | \\:Filter | Q:Quit "
                     footer_fill = " " * (w - len(footer_text))
                     safe_addstr(stdscr, h-1, 0, footer_text + footer_fill, curses.color_pair(6))
                     stdscr.attroff(curses.color_pair(6))
