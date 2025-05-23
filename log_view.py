@@ -2,7 +2,7 @@
 """
 Docker TUI - Log View Module
 -----------
-Handles container log viewing and search/filter functionality.
+Handles container log viewing with advanced filtering and dynamic tail support.
 """
 import curses
 import re
@@ -11,14 +11,23 @@ import subprocess
 import os
 from utils import safe_addstr
 
-def get_filter_indicator(filter_string):
-    """Generate a concise filter indicator for the header"""
-    if not filter_string:
-        return ""
+def parse_filter_expression(filter_string):
+    """Parse filter expression with AND/OR operators and parentheses
     
-    # Parse filters the same way as filter_logs does
-    filters = []
-    current_filter = ""
+    Returns a parsed structure that can be evaluated against log lines.
+    Supports:
+    - Basic terms: word, +word (include), -word/!word (exclude)
+    - AND operator: word AND word
+    - OR operator: word OR word
+    - Parentheses: (word OR word) AND word
+    - Quoted strings: "multi word phrase"
+    """
+    if not filter_string:
+        return None
+    
+    # Tokenize the filter string
+    tokens = []
+    current_token = ""
     in_quotes = False
     i = 0
     
@@ -26,45 +35,153 @@ def get_filter_indicator(filter_string):
         char = filter_string[i]
         
         if char == '"':
-            in_quotes = not in_quotes
-            i += 1
+            if in_quotes:
+                # End of quoted string
+                if current_token:
+                    tokens.append(('TERM', current_token))
+                    current_token = ""
+                in_quotes = False
+            else:
+                # Start of quoted string
+                if current_token:
+                    tokens.append(('TERM', current_token))
+                    current_token = ""
+                in_quotes = True
         elif char == ' ' and not in_quotes:
-            if current_filter:
-                filters.append(current_filter)
-                current_filter = ""
-            i += 1
+            if current_token:
+                # Check if it's an operator
+                if current_token.upper() == 'AND':
+                    tokens.append(('AND', 'AND'))
+                elif current_token.upper() == 'OR':
+                    tokens.append(('OR', 'OR'))
+                else:
+                    tokens.append(('TERM', current_token))
+                current_token = ""
+        elif char == '(' and not in_quotes:
+            if current_token:
+                tokens.append(('TERM', current_token))
+                current_token = ""
+            tokens.append(('LPAREN', '('))
+        elif char == ')' and not in_quotes:
+            if current_token:
+                tokens.append(('TERM', current_token))
+                current_token = ""
+            tokens.append(('RPAREN', ')'))
         else:
-            current_filter += char
-            i += 1
+            current_token += char
+        i += 1
     
-    if current_filter:
-        filters.append(current_filter)
+    # Add the last token
+    if current_token:
+        if current_token.upper() == 'AND':
+            tokens.append(('AND', 'AND'))
+        elif current_token.upper() == 'OR':
+            tokens.append(('OR', 'OR'))
+        else:
+            tokens.append(('TERM', current_token))
     
-    # Count inclusion and exclusion filters
-    inclusions = []
-    exclusions = []
+    # If no operators, treat as implicit AND between terms
+    if not any(t[0] in ('AND', 'OR') for t in tokens):
+        # Insert AND between consecutive terms
+        new_tokens = []
+        for i, token in enumerate(tokens):
+            new_tokens.append(token)
+            if (i < len(tokens) - 1 and 
+                token[0] in ('TERM', 'RPAREN') and 
+                tokens[i+1][0] in ('TERM', 'LPAREN')):
+                new_tokens.append(('AND', 'AND'))
+        tokens = new_tokens
     
-    for f in filters:
-        if f.startswith('!') or f.startswith('-'):
-            exclusions.append(f[1:])
-        elif f.startswith('+'):
-            inclusions.append(f[1:])
-        elif f:
-            inclusions.append(f)
+    return tokens
+
+def evaluate_filter(tokens, line, case_sensitive=False):
+    """Evaluate parsed filter tokens against a log line
     
-    parts = []
-    if inclusions:
-        inc_str = ','.join(inclusions[:2])
-        if len(inclusions) > 2:
-            inc_str += "..."
-        parts.append(f"+{inc_str}")
-    if exclusions:
-        exc_str = ','.join(exclusions[:2])
-        if len(exclusions) > 2:
-            exc_str += "..."
-        parts.append(f"-{exc_str}")
+    Uses a simple recursive descent parser to evaluate the expression.
+    """
+    if not tokens:
+        return True
     
-    return f" [FILTER: {' '.join(parts)}]"
+    flags = 0 if case_sensitive else re.IGNORECASE
+    
+    def evaluate_term(term, line):
+        """Evaluate a single term against the line"""
+        # Handle exclusion operators
+        if term.startswith('!') or term.startswith('-'):
+            search_term = term[1:]
+            if search_term:
+                pattern = re.compile(re.escape(search_term), flags)
+                return not pattern.search(line)
+            return True
+        # Handle explicit inclusion
+        elif term.startswith('+'):
+            search_term = term[1:]
+        else:
+            search_term = term
+        
+        if search_term:
+            pattern = re.compile(re.escape(search_term), flags)
+            return bool(pattern.search(line))
+        return True
+    
+    def parse_expression(pos=0):
+        """Parse and evaluate expression starting at position pos"""
+        if pos >= len(tokens):
+            return True, pos
+        
+        # Parse primary expression (term or parenthesized expression)
+        token_type, token_value = tokens[pos]
+        
+        if token_type == 'TERM':
+            result = evaluate_term(token_value, line)
+            pos += 1
+        elif token_type == 'LPAREN':
+            # Parse expression inside parentheses
+            result, pos = parse_expression(pos + 1)
+            if pos < len(tokens) and tokens[pos][0] == 'RPAREN':
+                pos += 1  # Skip closing paren
+        else:
+            return True, pos
+        
+        # Handle operators
+        while pos < len(tokens):
+            token_type, token_value = tokens[pos]
+            
+            if token_type == 'AND':
+                pos += 1
+                if pos < len(tokens):
+                    right_result, pos = parse_expression(pos)
+                    result = result and right_result
+                else:
+                    break
+            elif token_type == 'OR':
+                pos += 1
+                if pos < len(tokens):
+                    right_result, pos = parse_expression(pos)
+                    result = result or right_result
+                else:
+                    break
+            elif token_type == 'RPAREN':
+                # End of parenthesized expression
+                break
+            else:
+                break
+        
+        return result, pos
+    
+    result, _ = parse_expression()
+    return result
+
+def get_filter_indicator(filter_string):
+    """Generate a concise filter indicator for the header"""
+    if not filter_string:
+        return ""
+    
+    # For complex expressions, show a simplified version
+    if len(filter_string) > 30:
+        return f" [FILTER: {filter_string[:27]}...] "
+    else:
+        return f" [FILTER: {filter_string}] "
 
 def normalize_container_logs(normalize_logs, normalize_script, log_lines):
     """Pipe logs through normalize_logs.py script"""
@@ -335,92 +452,87 @@ def prev_search_match(search_matches, current_match, line_positions, wrap_log_li
     }
 
 def filter_logs(logs, filter_string, case_sensitive=False):
-    """Filter logs with support for inclusion and exclusion filters
-    
-    Filter syntax:
-    - "text" or "+text" : include lines containing "text"
-    - "!text" or "-text" : exclude lines containing "text"
-    - Multiple filters separated by spaces, e.g. "include -exclude +another"
-    - Use quotes for multi-word filters: "error -\"debug info\""
-    """
+    """Filter logs with advanced expression support"""
     if not filter_string:
         return logs, []  # Return original logs if no filter
     
-    # Parse filter string into individual filters
-    filters = []
-    current_filter = ""
-    in_quotes = False
-    i = 0
-    
-    while i < len(filter_string):
-        char = filter_string[i]
-        
-        if char == '"':
-            in_quotes = not in_quotes
-            i += 1
-        elif char == ' ' and not in_quotes:
-            if current_filter:
-                filters.append(current_filter)
-                current_filter = ""
-            i += 1
-        else:
-            current_filter += char
-            i += 1
-    
-    # Add the last filter if any
-    if current_filter:
-        filters.append(current_filter)
-    
-    if not filters:
+    # Parse the filter expression
+    tokens = parse_filter_expression(filter_string)
+    if not tokens:
         return logs, []
     
     filtered_logs = []
     line_map = []  # Maps filtered line index to original line index
-    flags = 0 if case_sensitive else re.IGNORECASE
     
     # Process each log line
     for i, line in enumerate(logs):
-        include_line = True
-        has_inclusion_filter = False
-        passes_inclusion = False
-        
-        # Check if we have any inclusion filters
-        for filter_term in filters:
-            if filter_term and not (filter_term.startswith('!') or filter_term.startswith('-')):
-                has_inclusion_filter = True
-                break
-        
-        # Apply each filter
-        for filter_term in filters:
-            if not filter_term:
-                continue
-                
-            # Determine filter type
-            if filter_term.startswith('!') or filter_term.startswith('-'):
-                # Exclusion filter
-                search_term = filter_term[1:]
-                if search_term:
-                    pattern = re.compile(re.escape(search_term), flags)
-                    if pattern.search(line):
-                        include_line = False
-                        break
-            else:
-                # Inclusion filter (with optional + prefix)
-                search_term = filter_term[1:] if filter_term.startswith('+') else filter_term
-                if search_term:
-                    pattern = re.compile(re.escape(search_term), flags)
-                    if pattern.search(line):
-                        passes_inclusion = True
-        
-        # If we have inclusion filters, the line must pass at least one
-        if has_inclusion_filter and not passes_inclusion:
-            include_line = False
-        
-        if include_line:
+        if evaluate_filter(tokens, line, case_sensitive):
             filtered_logs.append(line)
             line_map.append(i)
     
     return filtered_logs, line_map
+
+def show_tail_dialog(stdscr, current_tail):
+    """Show dialog to change the tail (number of lines) value"""
+    h, w = stdscr.getmaxyx()
+    
+    # Create dialog window
+    dialog_width = 50
+    dialog_height = 8
+    dialog_y = (h - dialog_height) // 2
+    dialog_x = (w - dialog_width) // 2
+    
+    dialog = curses.newwin(dialog_height, dialog_width, dialog_y, dialog_x)
+    dialog.keypad(True)
+    dialog.border()
+    
+    # Draw title
+    title = " Change Number of Log Lines "
+    safe_addstr(dialog, 0, (dialog_width - len(title)) // 2, title)
+    
+    # Draw instructions
+    safe_addstr(dialog, 2, 2, "Enter number of lines to show:")
+    safe_addstr(dialog, 3, 2, "(0 = all lines, default = 500)")
+    
+    # Input field
+    input_str = str(current_tail) if current_tail > 0 else ""
+    
+    curses.curs_set(1)  # Show cursor
+    
+    while True:
+        # Clear input line
+        safe_addstr(dialog, 4, 2, " " * (dialog_width - 4))
+        safe_addstr(dialog, 4, 2, input_str)
+        
+        # Position cursor
+        dialog.move(4, 2 + len(input_str))
+        dialog.refresh()
+        
+        ch = dialog.getch()
+        
+        if ch == 27:  # ESC - cancel
+            curses.curs_set(0)
+            return current_tail
+        elif ch == curses.KEY_BACKSPACE or ch == 127 or ch == 8:
+            if input_str:
+                input_str = input_str[:-1]
+        elif ch == 10:  # Enter - confirm
+            try:
+                new_tail = int(input_str) if input_str else 500
+                if new_tail < 0:
+                    new_tail = 0
+                curses.curs_set(0)
+                return new_tail
+            except ValueError:
+                # Invalid input - show error
+                safe_addstr(dialog, 5, 2, "Invalid number! Please try again.", 
+                           curses.color_pair(4))
+                dialog.refresh()
+                time.sleep(1)
+                safe_addstr(dialog, 5, 2, " " * (dialog_width - 4))
+        elif ch >= ord('0') and ch <= ord('9'):
+            if len(input_str) < 6:  # Limit to 6 digits
+                input_str += chr(ch)
     
 def show_logs(tui, stdscr, container):
     """Display container logs with follow mode and search"""
@@ -437,8 +549,14 @@ def show_logs(tui, stdscr, container):
         safe_addstr(stdscr, h//2, (w-25)//2, "Loading logs, please wait...", curses.A_BOLD)
         stdscr.refresh()
         
+        # Initialize tail value (default 500)
+        tail_lines = getattr(tui, 'log_tail_lines', 500)
+        
         # Fetch initial logs
-        raw_logs = container.logs(tail=500).decode(errors='ignore').splitlines()
+        if tail_lines == 0:
+            raw_logs = container.logs().decode(errors='ignore').splitlines()
+        else:
+            raw_logs = container.logs(tail=tail_lines).decode(errors='ignore').splitlines()
         
         # Process logs through normalize_logs.py
         logs = normalize_container_logs(tui.normalize_logs, tui.normalize_logs_script, raw_logs) if tui.normalize_logs else raw_logs
@@ -518,20 +636,21 @@ def show_logs(tui, stdscr, container):
         wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
         search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
         filter_indicator = get_filter_indicator(filter_string) if filtering_active else ""
-        header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
+        tail_indicator = f" [TAIL: {tail_lines if tail_lines > 0 else 'ALL'}]"
+        header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + tail_indicator + search_indicator + filter_indicator
         safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
         stdscr.attroff(curses.color_pair(5))
         
         # Draw footer with help
         if filtering_active:
             if tui.wrap_log_lines:
-                footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
             else:
-                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
         elif tui.wrap_log_lines:
-            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
+            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
         else:
-            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
+            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
         
         stdscr.attron(curses.color_pair(6))
         safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -717,7 +836,7 @@ def show_logs(tui, stdscr, container):
                         # Update UI if search was successful
                         if search_matches:
                             # Jump to first match
-                            next_match = next_search_match(search_matches, current_match, line_positions, tui.wrap_log_lines, w)
+                            next_match = next_search_match(search_matches, current_match - 1, line_positions, tui.wrap_log_lines, w)
                             if next_match:
                                 pos = next_match['position']
                                 current_match = next_match['match_index']
@@ -746,20 +865,21 @@ def show_logs(tui, stdscr, container):
                             wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                             search_indicator = f" [SEARCH: {search_string}]"
                             filter_indicator = get_filter_indicator(filter_string) if filtering_active else ""
-                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
+                            tail_indicator = f" [TAIL: {tail_lines if tail_lines > 0 else 'ALL'}]"
+                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + tail_indicator + search_indicator + filter_indicator
                             safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                             stdscr.attroff(curses.color_pair(5))
                             
                             # Restore normal footer
                             if filtering_active:
                                 if tui.wrap_log_lines:
-                                    footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                    footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
                                 else:
-                                    footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                    footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
                             elif tui.wrap_log_lines:
-                                footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
+                                footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
                             else:
-                                footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
+                                footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
                             
                             stdscr.attron(curses.color_pair(6))
                             safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -825,7 +945,7 @@ def show_logs(tui, stdscr, container):
                 safe_addstr(stdscr, h-1, len(filter_prompt), filter_input + " " * (w - len(filter_prompt) - len(filter_input) - 1), curses.color_pair(6))
                 
                 # Show filter help
-                help_text = "Space-separated filters: word +include -exclude \"multi word\" | Tab:Case"
+                help_text = "Syntax: term AND/OR term, (term OR term), +include -exclude \"multi word\" | Tab:Case"
                 if w > len(help_text) + 15:
                     safe_addstr(stdscr, h-2, (w - len(help_text)) // 2, help_text, curses.A_DIM)
                 
@@ -894,7 +1014,8 @@ def show_logs(tui, stdscr, container):
                         wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                         search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
                         filter_indicator = get_filter_indicator(filter_string)
-                        header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
+                        tail_indicator = f" [TAIL: {tail_lines if tail_lines > 0 else 'ALL'}]"
+                        header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + tail_indicator + search_indicator + filter_indicator
                         safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                         stdscr.attroff(curses.color_pair(5))
                         
@@ -935,7 +1056,8 @@ def show_logs(tui, stdscr, container):
                             normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
                             wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                             search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
-                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator
+                            tail_indicator = f" [TAIL: {tail_lines if tail_lines > 0 else 'ALL'}]"
+                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + tail_indicator + search_indicator
                             safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                             stdscr.attroff(curses.color_pair(5))
                             
@@ -973,16 +1095,17 @@ def show_logs(tui, stdscr, container):
                     wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                     search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
                     filter_indicator = f" [FILTER: {filter_string}]" if filtering_active else ""
-                    header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
+                    tail_indicator = f" [TAIL: {tail_lines if tail_lines > 0 else 'ALL'}]"
+                    header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + tail_indicator + search_indicator + filter_indicator
                     safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                     stdscr.attroff(curses.color_pair(5))
                     
                     # Update footer if filtering is active
                     if filtering_active:
                         if tui.wrap_log_lines:
-                            footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                            footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
                         else:
-                            footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                            footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
                         
                         stdscr.attron(curses.color_pair(6))
                         safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -1074,41 +1197,9 @@ def show_logs(tui, stdscr, container):
                     for i in range(2, h-2):
                         safe_addstr(stdscr, i, 0, " " * (w-1))
                     
-                    # Parse filter to show what's active
-                    filter_desc = []
-                    filters = []
-                    current_filter = ""
-                    in_quotes = False
-                    i = 0
-                    
-                    while i < len(filter_string):
-                        char = filter_string[i]
-                        if char == '"':
-                            in_quotes = not in_quotes
-                            i += 1
-                        elif char == ' ' and not in_quotes:
-                            if current_filter:
-                                filters.append(current_filter)
-                                current_filter = ""
-                            i += 1
-                        else:
-                            current_filter += char
-                            i += 1
-                    
-                    if current_filter:
-                        filters.append(current_filter)
-                    
-                    for f in filters:
-                        if f.startswith('!') or f.startswith('-'):
-                            filter_desc.append(f"excluding '{f[1:]}'")
-                        elif f.startswith('+'):
-                            filter_desc.append(f"including '{f[1:]}'")
-                        elif f:
-                            filter_desc.append(f"including '{f}'")
-                    
-                    # Show waiting message
+                    # Show the actual filter expression
                     empty_msg1 = "No logs matching filter:"
-                    empty_msg2 = " AND ".join(filter_desc) if filter_desc else filter_string
+                    empty_msg2 = filter_string
                     empty_msg3 = "Waiting for matching logs..."
                     empty_msg4 = "(Press \\ to change filter or ESC to clear)"
                     
@@ -1182,22 +1273,77 @@ def show_logs(tui, stdscr, container):
                         wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                         search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
                         filter_indicator = get_filter_indicator(filter_string) if filtering_active else ""
-                        header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
+                        tail_indicator = f" [TAIL: {tail_lines if tail_lines > 0 else 'ALL'}]"
+                        header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + tail_indicator + search_indicator + filter_indicator
                         safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                         stdscr.attroff(curses.color_pair(5))
                         
                         # Update footer based on filter state
                         if filtering_active:
                             if tui.wrap_log_lines:
-                                footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
                             else:
-                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
                             
                             stdscr.attron(curses.color_pair(6))
                             safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
                             stdscr.attroff(curses.color_pair(6))
                         
                         stdscr.refresh()
+                    elif ch in (ord('t'), ord('T')):  # Change tail lines
+                        new_tail = show_tail_dialog(stdscr, tail_lines)
+                        if new_tail != tail_lines:
+                            tail_lines = new_tail
+                            tui.log_tail_lines = tail_lines  # Store in TUI state
+                            
+                            # Reload logs with new tail value
+                            stdscr.clear()
+                            safe_addstr(stdscr, h//2, (w-25)//2, "Reloading logs, please wait...", curses.A_BOLD)
+                            stdscr.refresh()
+                            
+                            # Fetch logs with new tail value
+                            if tail_lines == 0:
+                                raw_logs = container.logs().decode(errors='ignore').splitlines()
+                            else:
+                                raw_logs = container.logs(tail=tail_lines).decode(errors='ignore').splitlines()
+                            
+                            # Reset everything
+                            all_raw_logs = raw_logs.copy()
+                            logs = normalize_container_logs(tui.normalize_logs, tui.normalize_logs_script, raw_logs) if tui.normalize_logs else raw_logs
+                            original_logs = logs.copy()
+                            
+                            # Apply filter if active
+                            if filtering_active:
+                                filtered_logs, filtered_line_map = filter_logs(original_logs, filter_string, case_sensitive)
+                                logs = filtered_logs
+                            
+                            # Rebuild pad
+                            pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
+                            pad = pad_info['pad']
+                            line_positions = pad_info['line_positions']
+                            actual_lines_count = pad_info['actual_lines']
+                            
+                            # Update line count
+                            last_logical_lines_count = len(logs)
+                            last_log_line = logs[-1] if logs else ""
+                            last_log_count = len(logs)
+                            
+                            # Reapply search if needed
+                            if search_string:
+                                search_result = search_and_highlight(pad, logs, search_string, line_positions, w, case_sensitive, pos)
+                                search_matches = search_result['matches']
+                                current_match = search_result['current_match']
+                                highlight_search_matches(pad, line_positions, tui.wrap_log_lines, w, search_matches, current_match)
+                            
+                            # Go to end if in follow mode
+                            if follow_mode:
+                                pos = max(0, actual_lines_count - (h-4))
+                            else:
+                                pos = 0
+                            
+                            # Force redraw
+                            stdscr.clear()
+                            last_display_time = 0
                     elif ch in (ord('n'), ord('N')):  # Toggle normalization or next/prev search
                         if ch == ord('n') and search_string and search_matches:
                             # Use 'n' for next search match
@@ -1254,7 +1400,8 @@ def show_logs(tui, stdscr, container):
                             wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                             search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
                             filter_indicator = get_filter_indicator(filter_string) if filtering_active else ""
-                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
+                            tail_indicator = f" [TAIL: {tail_lines if tail_lines > 0 else 'ALL'}]"
+                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + tail_indicator + search_indicator + filter_indicator
                             safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                             stdscr.attroff(curses.color_pair(5))
                             stdscr.refresh()
@@ -1287,13 +1434,13 @@ def show_logs(tui, stdscr, container):
                         # Update footer immediately to show horizontal scroll keys if unwrapped
                         if filtering_active:
                             if tui.wrap_log_lines:
-                                footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
                             else:
-                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
                         elif tui.wrap_log_lines:
-                            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
+                            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
                         else:
-                            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
+                            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
                         
                         stdscr.attron(curses.color_pair(6))
                         safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -1305,7 +1452,8 @@ def show_logs(tui, stdscr, container):
                         wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                         search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
                         filter_indicator = f" [FILTER: {filter_string}]" if filtering_active else ""
-                        header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
+                        tail_indicator = f" [TAIL: {tail_lines if tail_lines > 0 else 'ALL'}]"
+                        header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + tail_indicator + search_indicator + filter_indicator
                         safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                         stdscr.attroff(curses.color_pair(5))
                         stdscr.refresh()
@@ -1362,7 +1510,7 @@ def show_logs(tui, stdscr, container):
                         safe_addstr(stdscr, h-1, len(filter_prompt), filter_input + " " * (w - len(filter_prompt) - len(filter_input) - 1), curses.color_pair(6))
                         
                         # Show filter help
-                        help_text = "Space-separated filters: word +include -exclude \"multi word\" | Tab:Case"
+                        help_text = "Syntax: term AND/OR term, (term OR term), +include -exclude \"multi word\" | Tab:Case"
                         if w > len(help_text) + 15:
                             safe_addstr(stdscr, h-2, (w - len(help_text)) // 2, help_text, curses.A_DIM)
                         
@@ -1433,7 +1581,8 @@ def show_logs(tui, stdscr, container):
                             normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
                             wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                             search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
-                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator
+                            tail_indicator = f" [TAIL: {tail_lines if tail_lines > 0 else 'ALL'}]"
+                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + tail_indicator + search_indicator
                             safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                             stdscr.attroff(curses.color_pair(5))
                             
