@@ -21,6 +21,55 @@ from config import load_config, save_config
 from stats import schedule_stats_collection
 from container_actions import show_menu, execute_action
 
+# Batch stats collection via docker stats CLI
+import subprocess
+
+def schedule_stats_collection(tui, containers):
+    """Batch-collect stats for all running containers via docker stats CLI, mapping short IDs to full IDs."""
+    if not containers:
+        return
+    id_map = {c.id[:12]: c.id for c in containers}
+    fmt = (
+        "{{.Container}}|{{.Name}}|{{.CPUPerc}}|"
+        "{{.MemPerc}}|{{.NetIO}}|{{.BlockIO}}"
+    )
+    cmd = ["docker", "stats", "--no-stream", "--format", fmt]
+    try:
+        output = subprocess.check_output(cmd, text=True)
+        new_cache = {}
+        now = time.time()
+        for line in output.splitlines():
+            parts = line.split("|")
+            if len(parts) != 6:
+                continue
+            short_id, name, cpu, mem, netio, blockio = parts
+            full_id = id_map.get(short_id)
+            if not full_id:
+                continue
+            try:
+                cpu_pct = float(cpu.strip("%"))
+            except ValueError:
+                cpu_pct = 0.0
+            try:
+                mem_pct = float(mem.strip("%"))
+            except ValueError:
+                mem_pct = 0.0
+            new_cache[full_id] = {
+                "cpu": cpu_pct,
+                "mem": mem_pct,
+                "net_in_rate": 0,
+                "net_out_rate": 0,
+                "net_in": 0,
+                "net_out": 0,
+                "time": now
+            }
+        with tui.stats_lock:
+            tui.stats_cache.clear()
+            tui.stats_cache.update(new_cache)
+    except Exception:
+        pass
+
+
 class DockerTUI:
     def __init__(self):
         self.client = docker.from_env()
@@ -29,7 +78,7 @@ class DockerTUI:
         self.running = True
         self.fetch_lock = threading.Lock()
         self.last_container_fetch = 0
-        self.container_fetch_interval = 2  # seconds
+        self.container_fetch_interval = 0.5  # seconds
         
         # Stats cache
         self.stats_lock = threading.Lock()
@@ -83,7 +132,7 @@ class DockerTUI:
                     
                     # Schedule stats collection for all running containers
                     running_containers = [c for c in self.containers if c.status == 'running']
-                    schedule_stats_collection(self, running_containers)
+                    self.executor.submit(schedule_stats_collection, self, running_containers)
                     
                 except docker.errors.DockerException:
                     # Keep existing containers if fetch fails
