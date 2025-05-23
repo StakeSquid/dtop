@@ -12,7 +12,7 @@ A high-performance terminal UI for Docker container management with real-time mo
 - **Log Management**: 
   - Advanced normalization for consistent log formatting
   - Text search with highlighted results
-  - Grep-like filtering
+  - Powerful filtering with inclusion/exclusion support
   - Follow mode for real-time updates
 - **Container Controls**: Start/stop, pause/unpause, restart, exec shell, force recreate
 - **Mouse Support**: Click navigation, scrolling, and menu interaction
@@ -75,7 +75,7 @@ sudo rm -rf /usr/local/bin/docker-tui /usr/local/bin/dtop
 | | N | Toggle log normalization |
 | | W | Toggle line wrapping |
 | | n/N | Next/previous search hit |
-| | ESC | Return to container list |
+| | ESC | Clear filter or return to container list |
 
 ### Container Actions
 
@@ -85,6 +85,35 @@ sudo rm -rf /usr/local/bin/docker-tui /usr/local/bin/dtop
 - **Restart**: Restart the container
 - **Recreate**: Recreate container from image
 - **Exec Shell**: Open interactive shell in container
+
+## Advanced Log Filtering
+
+The log viewer supports powerful filtering with both inclusion and exclusion patterns:
+
+### Filter Syntax
+
+- **Include**: `word` or `+word` - Show only lines containing "word"
+- **Exclude**: `-word` or `!word` - Hide lines containing "word"
+- **Multiple filters**: Space-separated, all conditions must match
+- **Multi-word**: Use quotes for phrases: `"error message" -"debug"`
+
+### Examples
+
+```
+error                    # Show only lines with "error"
++error -debug           # Show lines with "error" but not "debug"
+error warning -verbose  # Show lines with "error" OR "warning", but not "verbose"
+"connection failed"     # Show lines with exact phrase
++ERROR -"DEBUG:" -INFO  # Case-sensitive: ERROR lines without DEBUG: or INFO
+```
+
+### Filter Behavior
+
+- Multiple inclusion filters work as OR (any match includes the line)
+- Exclusion filters always take precedence (any match excludes the line)
+- Press Tab to toggle case sensitivity
+- Press ESC to clear active filter
+- Press \\ to modify current filter
 
 ## Configuration
 
