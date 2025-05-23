@@ -11,6 +11,61 @@ import subprocess
 import os
 from utils import safe_addstr
 
+def get_filter_indicator(filter_string):
+    """Generate a concise filter indicator for the header"""
+    if not filter_string:
+        return ""
+    
+    # Parse filters the same way as filter_logs does
+    filters = []
+    current_filter = ""
+    in_quotes = False
+    i = 0
+    
+    while i < len(filter_string):
+        char = filter_string[i]
+        
+        if char == '"':
+            in_quotes = not in_quotes
+            i += 1
+        elif char == ' ' and not in_quotes:
+            if current_filter:
+                filters.append(current_filter)
+                current_filter = ""
+            i += 1
+        else:
+            current_filter += char
+            i += 1
+    
+    if current_filter:
+        filters.append(current_filter)
+    
+    # Count inclusion and exclusion filters
+    inclusions = []
+    exclusions = []
+    
+    for f in filters:
+        if f.startswith('!') or f.startswith('-'):
+            exclusions.append(f[1:])
+        elif f.startswith('+'):
+            inclusions.append(f[1:])
+        elif f:
+            inclusions.append(f)
+    
+    parts = []
+    if inclusions:
+        inc_str = ','.join(inclusions[:2])
+        if len(inclusions) > 2:
+            inc_str += "..."
+        parts.append(f"+{inc_str}")
+    if exclusions:
+        exc_str = ','.join(exclusions[:2])
+        if len(exclusions) > 2:
+            exc_str += "..."
+        parts.append(f"-{exc_str}")
+    
+    return f" [FILTER: {' '.join(parts)}]"
+
 def normalize_container_logs(normalize_logs, normalize_script, log_lines):
     """Pipe logs through normalize_logs.py script"""
     if not normalize_logs or not os.path.isfile(normalize_script):
@@ -280,23 +335,93 @@ def prev_search_match(search_matches, current_match, line_positions, wrap_log_li
     }
 
 def filter_logs(logs, filter_string, case_sensitive=False):
-    """Filter logs to only include lines matching the filter string"""
+    """Filter logs with support for inclusion and exclusion filters
+    
+    Filter syntax:
+    - "text" or "+text" : include lines containing "text"
+    - "!text" or "-text" : exclude lines containing "text"
+    - Multiple filters separated by spaces, e.g. "include -exclude +another"
+    - Use quotes for multi-word filters: "error -\"debug info\""
+    """
     if not filter_string:
         return logs, []  # Return original logs if no filter
     
+    # Parse filter string into individual filters
+    filters = []
+    current_filter = ""
+    in_quotes = False
+    i = 0
+    
+    while i < len(filter_string):
+        char = filter_string[i]
+        
+        if char == '"':
+            in_quotes = not in_quotes
+            i += 1
+        elif char == ' ' and not in_quotes:
+            if current_filter:
+                filters.append(current_filter)
+                current_filter = ""
+            i += 1
+        else:
+            current_filter += char
+            i += 1
+    
+    # Add the last filter if any
+    if current_filter:
+        filters.append(current_filter)
+    
+    if not filters:
+        return logs, []
+    
     filtered_logs = []
     line_map = []  # Maps filtered line index to original line index
-    
     flags = 0 if case_sensitive else re.IGNORECASE
-    pattern = re.compile(re.escape(filter_string), flags)
     
+    # Process each log line
     for i, line in enumerate(logs):
-        if pattern.search(line):
+        include_line = True
+        has_inclusion_filter = False
+        passes_inclusion = False
+        
+        # Check if we have any inclusion filters
+        for filter_term in filters:
+            if filter_term and not (filter_term.startswith('!') or filter_term.startswith('-')):
+                has_inclusion_filter = True
+                break
+        
+        # Apply each filter
+        for filter_term in filters:
+            if not filter_term:
+                continue
+                
+            # Determine filter type
+            if filter_term.startswith('!') or filter_term.startswith('-'):
+                # Exclusion filter
+                search_term = filter_term[1:]
+                if search_term:
+                    pattern = re.compile(re.escape(search_term), flags)
+                    if pattern.search(line):
+                        include_line = False
+                        break
+            else:
+                # Inclusion filter (with optional + prefix)
+                search_term = filter_term[1:] if filter_term.startswith('+') else filter_term
+                if search_term:
+                    pattern = re.compile(re.escape(search_term), flags)
+                    if pattern.search(line):
+                        passes_inclusion = True
+        
+        # If we have inclusion filters, the line must pass at least one
+        if has_inclusion_filter and not passes_inclusion:
+            include_line = False
+        
+        if include_line:
             filtered_logs.append(line)
             line_map.append(i)
     
     return filtered_logs, line_map
-
+    
 def show_logs(tui, stdscr, container):
     """Display container logs with follow mode and search"""
     try:
@@ -392,7 +517,7 @@ def show_logs(tui, stdscr, container):
         normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
         wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
         search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
-        filter_indicator = f" [FILTER: {filter_string}]" if filtering_active else ""
+        filter_indicator = get_filter_indicator(filter_string) if filtering_active else ""
         header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
         safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
         stdscr.attroff(curses.color_pair(5))
@@ -620,7 +745,7 @@ def show_logs(tui, stdscr, container):
                             normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
                             wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                             search_indicator = f" [SEARCH: {search_string}]"
-                            filter_indicator = f" [FILTER: {filter_string}]" if filtering_active else ""
+                            filter_indicator = get_filter_indicator(filter_string) if filtering_active else ""
                             header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
                             safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                             stdscr.attroff(curses.color_pair(5))
@@ -699,8 +824,13 @@ def show_logs(tui, stdscr, container):
                 safe_addstr(stdscr, h-1, 0, filter_prompt, curses.color_pair(6) | curses.A_BOLD)
                 safe_addstr(stdscr, h-1, len(filter_prompt), filter_input + " " * (w - len(filter_prompt) - len(filter_input) - 1), curses.color_pair(6))
                 
+                # Show filter help
+                help_text = "Space-separated filters: word +include -exclude \"multi word\" | Tab:Case"
+                if w > len(help_text) + 15:
+                    safe_addstr(stdscr, h-2, (w - len(help_text)) // 2, help_text, curses.A_DIM)
+                
                 # Show case sensitivity indicator
-                case_text = "Case: " + ("ON" if case_sensitive else "OFF") + " (Tab)"
+                case_text = "Case: " + ("ON" if case_sensitive else "OFF")
                 safe_addstr(stdscr, h-1, w - len(case_text) - 1, case_text, curses.color_pair(6) | curses.A_BOLD)
                 stdscr.attroff(curses.color_pair(6))
                 
@@ -763,7 +893,7 @@ def show_logs(tui, stdscr, container):
                         normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
                         wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                         search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
-                        filter_indicator = f" [FILTER: {filter_string}]"
+                        filter_indicator = get_filter_indicator(filter_string)
                         header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
                         safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                         stdscr.attroff(curses.color_pair(5))
@@ -944,15 +1074,49 @@ def show_logs(tui, stdscr, container):
                     for i in range(2, h-2):
                         safe_addstr(stdscr, i, 0, " " * (w-1))
                     
+                    # Parse filter to show what's active
+                    filter_desc = []
+                    filters = []
+                    current_filter = ""
+                    in_quotes = False
+                    i = 0
+                    
+                    while i < len(filter_string):
+                        char = filter_string[i]
+                        if char == '"':
+                            in_quotes = not in_quotes
+                            i += 1
+                        elif char == ' ' and not in_quotes:
+                            if current_filter:
+                                filters.append(current_filter)
+                                current_filter = ""
+                            i += 1
+                        else:
+                            current_filter += char
+                            i += 1
+                    
+                    if current_filter:
+                        filters.append(current_filter)
+                    
+                    for f in filters:
+                        if f.startswith('!') or f.startswith('-'):
+                            filter_desc.append(f"excluding '{f[1:]}'")
+                        elif f.startswith('+'):
+                            filter_desc.append(f"including '{f[1:]}'")
+                        elif f:
+                            filter_desc.append(f"including '{f}'")
+                    
                     # Show waiting message
-                    empty_msg1 = f"No logs matching filter: '{filter_string}'"
-                    empty_msg2 = "Waiting for matching logs..."
-                    empty_msg3 = "(Press \\ to change filter or ESC to clear)"
+                    empty_msg1 = "No logs matching filter:"
+                    empty_msg2 = " AND ".join(filter_desc) if filter_desc else filter_string
+                    empty_msg3 = "Waiting for matching logs..."
+                    empty_msg4 = "(Press \\ to change filter or ESC to clear)"
                     
                     center_y = h // 2
-                    safe_addstr(stdscr, center_y - 1, (w - len(empty_msg1)) // 2, empty_msg1, curses.A_BOLD)
-                    safe_addstr(stdscr, center_y, (w - len(empty_msg2)) // 2, empty_msg2, curses.A_DIM)
-                    safe_addstr(stdscr, center_y + 1, (w - len(empty_msg3)) // 2, empty_msg3, curses.A_DIM)
+                    safe_addstr(stdscr, center_y - 2, (w - len(empty_msg1)) // 2, empty_msg1, curses.A_BOLD)
+                    safe_addstr(stdscr, center_y - 1, (w - len(empty_msg2)) // 2, empty_msg2, curses.A_DIM)
+                    safe_addstr(stdscr, center_y, (w - len(empty_msg3)) // 2, empty_msg3, curses.A_DIM)
+                    safe_addstr(stdscr, center_y + 1, (w - len(empty_msg4)) // 2, empty_msg4, curses.A_DIM)
                     
                     stdscr.refresh()
                 else:
@@ -1017,7 +1181,7 @@ def show_logs(tui, stdscr, container):
                         normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
                         wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                         search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
-                        filter_indicator = f" [FILTER: {filter_string}]" if filtering_active else ""
+                        filter_indicator = get_filter_indicator(filter_string) if filtering_active else ""
                         header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
                         safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                         stdscr.attroff(curses.color_pair(5))
@@ -1089,7 +1253,7 @@ def show_logs(tui, stdscr, container):
                             normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
                             wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
                             search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
-                            filter_indicator = f" [FILTER: {filter_string}]" if filtering_active else ""
+                            filter_indicator = get_filter_indicator(filter_string) if filtering_active else ""
                             header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
                             safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                             stdscr.attroff(curses.color_pair(5))
@@ -1197,8 +1361,13 @@ def show_logs(tui, stdscr, container):
                         safe_addstr(stdscr, h-1, 0, filter_prompt, curses.color_pair(6) | curses.A_BOLD)
                         safe_addstr(stdscr, h-1, len(filter_prompt), filter_input + " " * (w - len(filter_prompt) - len(filter_input) - 1), curses.color_pair(6))
                         
+                        # Show filter help
+                        help_text = "Space-separated filters: word +include -exclude \"multi word\" | Tab:Case"
+                        if w > len(help_text) + 15:
+                            safe_addstr(stdscr, h-2, (w - len(help_text)) // 2, help_text, curses.A_DIM)
+                        
                         # Show case sensitivity indicator
-                        case_text = "Case: " + ("ON" if case_sensitive else "OFF") + " (Tab)"
+                        case_text = "Case: " + ("ON" if case_sensitive else "OFF")
                         safe_addstr(stdscr, h-1, w - len(case_text) - 1, case_text, curses.color_pair(6) | curses.A_BOLD)
                         stdscr.attroff(curses.color_pair(6))
                         
