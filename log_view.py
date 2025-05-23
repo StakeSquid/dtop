@@ -56,6 +56,16 @@ def normalize_container_logs(normalize_logs, normalize_script, log_lines):
 
 def rebuild_log_pad(logs, width, height, wrap_log_lines):
     """Rebuild the log pad with current wrapping and normalization settings"""
+    # Handle empty logs case
+    if not logs:
+        # Create a minimal pad for empty state
+        new_pad = curses.newpad(10, max(width-2, 10))
+        return {
+            'pad': new_pad,
+            'line_positions': [],
+            'actual_lines': 0
+        }
+    
     # Estimate pad size needed
     pad_height = max(len(logs)+100, 500)
     
@@ -341,6 +351,7 @@ def show_logs(tui, stdscr, container):
         filter_string = ""
         filter_input = ""
         filter_mode = False
+        # Initial state flags
         filtering_active = False
         filtered_logs = []
         filtered_line_map = []  # Maps filtered index to original index
@@ -387,7 +398,12 @@ def show_logs(tui, stdscr, container):
         stdscr.attroff(curses.color_pair(5))
         
         # Draw footer with help
-        if tui.wrap_log_lines:
+        if filtering_active:
+            if tui.wrap_log_lines:
+                footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+            else:
+                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+        elif tui.wrap_log_lines:
             footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
         else:
             footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
@@ -525,7 +541,10 @@ def show_logs(tui, stdscr, container):
                 last_log_time = current_time
             
             # Always ensure pos is valid
-            pos = max(0, min(pos, max(0, actual_lines_count - 1)))
+            if actual_lines_count > 0:
+                pos = max(0, min(pos, actual_lines_count - 1))
+            else:
+                pos = 0
             
             # Handle search input mode
             if search_mode:
@@ -607,7 +626,12 @@ def show_logs(tui, stdscr, container):
                             stdscr.attroff(curses.color_pair(5))
                             
                             # Restore normal footer
-                            if tui.wrap_log_lines:
+                            if filtering_active:
+                                if tui.wrap_log_lines:
+                                    footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                else:
+                                    footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                            elif tui.wrap_log_lines:
                                 footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
                             else:
                                 footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
@@ -703,72 +727,55 @@ def show_logs(tui, stdscr, container):
                         # Apply filter to logs
                         filtered_logs, filtered_line_map = filter_logs(original_logs, filter_string, case_sensitive)
                         
-                        # Show message if no matches
-                        if not filtered_logs:
-                            safe_addstr(stdscr, h-2, 0, f" No matches found for filter '{filter_string}' ", curses.A_BOLD)
-                            stdscr.refresh()
-                            time.sleep(1)  # Show message briefly
-                            
-                            # Clear any remaining input in the buffer
-                            stdscr.nodelay(True)
-                            while stdscr.getch() != -1:
-                                pass
-                            stdscr.nodelay(False)
-                            
-                            # Exit filter mode but don't apply filter
-                            filter_mode = False
-                            curses.curs_set(0)  # Hide cursor
-                            just_processed_filter = True
-                        else:
-                            # Apply filter
-                            filtering_active = True
-                            logs = filtered_logs
-                            
-                            # Rebuild pad with filtered logs
-                            pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
-                            pad = pad_info['pad']
-                            line_positions = pad_info['line_positions']
-                            actual_lines_count = pad_info['actual_lines']
-                            
-                            # Update line count
-                            last_logical_lines_count = len(logs)
-                            
-                            # Apply search highlighting if there's a search pattern
-                            if search_string:
-                                search_result = search_and_highlight(pad, logs, search_string, line_positions, w, case_sensitive, pos)
-                                search_matches = search_result['matches']
-                                current_match = search_result['current_match']
-                                highlight_search_matches(pad, line_positions, tui.wrap_log_lines, w, search_matches, current_match)
-                            
-                            # Exit filter mode
-                            filter_mode = False
-                            curses.curs_set(0)  # Hide cursor
-                            
-                            # Clear input buffer
-                            stdscr.nodelay(True)
-                            while stdscr.getch() != -1:
-                                pass
-                            stdscr.nodelay(False)
-                            
-                            # Update header with filter info
-                            stdscr.attron(curses.color_pair(5))
-                            safe_addstr(stdscr, 0, 0, " " * w)
-                            normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
-                            wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
-                            search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
-                            filter_indicator = f" [FILTER: {filter_string}]"
-                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
-                            safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
-                            stdscr.attroff(curses.color_pair(5))
-                            
-                            # Update filter info in status line
-                            filter_info = f" Filtered: {len(filtered_logs)}/{len(original_logs)} lines "
-                            safe_addstr(stdscr, 1, 0, filter_info, curses.A_BOLD)
-                            
-                            # Reset position to start of filtered logs
-                            pos = 0
-                            
-                            just_processed_filter = True
+                        # Apply filter regardless of whether there are matches
+                        filtering_active = True
+                        logs = filtered_logs
+                        
+                        # Rebuild pad with filtered logs
+                        pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
+                        pad = pad_info['pad']
+                        line_positions = pad_info['line_positions']
+                        actual_lines_count = pad_info['actual_lines']
+                        
+                        # Update line count
+                        last_logical_lines_count = len(logs)
+                        
+                        # Apply search highlighting if there's a search pattern
+                        if search_string:
+                            search_result = search_and_highlight(pad, logs, search_string, line_positions, w, case_sensitive, pos)
+                            search_matches = search_result['matches']
+                            current_match = search_result['current_match']
+                            highlight_search_matches(pad, line_positions, tui.wrap_log_lines, w, search_matches, current_match)
+                        
+                        # Exit filter mode
+                        filter_mode = False
+                        curses.curs_set(0)  # Hide cursor
+                        
+                        # Clear input buffer
+                        stdscr.nodelay(True)
+                        while stdscr.getch() != -1:
+                            pass
+                        stdscr.nodelay(False)
+                        
+                        # Update header with filter info
+                        stdscr.attron(curses.color_pair(5))
+                        safe_addstr(stdscr, 0, 0, " " * w)
+                        normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
+                        wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
+                        search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
+                        filter_indicator = f" [FILTER: {filter_string}]"
+                        header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
+                        safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
+                        stdscr.attroff(curses.color_pair(5))
+                        
+                        # Update filter info in status line
+                        filter_info = f" Filtered: {len(filtered_logs)}/{len(original_logs)} lines "
+                        safe_addstr(stdscr, 1, 0, filter_info, curses.A_BOLD)
+                        
+                        # Reset position to start of filtered logs
+                        pos = 0
+                        
+                        just_processed_filter = True
                     else:
                         # Empty filter string - clear filter
                         if filtering_active:
@@ -829,7 +836,7 @@ def show_logs(tui, stdscr, container):
             # Update display regularly regardless of new logs or position changes
             elif current_time - last_display_time >= draw_interval:  # Use the specified draw interval
                 # Update header only when needed (status change)
-                if follow_mode != last_follow_mode or tui.normalize_logs != last_normalize_logs or tui.wrap_log_lines != last_wrap_lines:
+                if follow_mode != last_follow_mode or tui.normalize_logs != last_normalize_logs or tui.wrap_log_lines != last_wrap_lines or (filtering_active and not logs):
                     stdscr.attron(curses.color_pair(5))
                     safe_addstr(stdscr, 0, 0, " " * w)
                     normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
@@ -840,20 +847,36 @@ def show_logs(tui, stdscr, container):
                     safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                     stdscr.attroff(curses.color_pair(5))
                     
+                    # Update footer if filtering is active
+                    if filtering_active:
+                        if tui.wrap_log_lines:
+                            footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                        else:
+                            footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                        
+                        stdscr.attron(curses.color_pair(6))
+                        safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
+                        stdscr.attroff(curses.color_pair(6))
+                    
                     # Track current state
                     last_follow_mode = follow_mode
                     last_normalize_logs = tui.normalize_logs
                     last_wrap_lines = tui.wrap_log_lines
                 
                 # Update line counter
-                logical_pos = 0
-                for i, line_pos in enumerate(line_positions):
-                    if line_pos > pos:
-                        break
-                    logical_pos = i
-                
-                line_info = f" Line: {logical_pos+1}/{last_logical_lines_count} "
-                safe_addstr(stdscr, 1, w-len(line_info)-1, line_info)
+                if line_positions:
+                    logical_pos = 0
+                    for i, line_pos in enumerate(line_positions):
+                        if line_pos > pos:
+                            break
+                        logical_pos = i
+                    
+                    line_info = f" Line: {logical_pos+1}/{last_logical_lines_count} "
+                    safe_addstr(stdscr, 1, w-len(line_info)-1, line_info)
+                else:
+                    # No lines to display
+                    line_info = f" Line: 0/{last_logical_lines_count} "
+                    safe_addstr(stdscr, 1, w-len(line_info)-1, line_info)
                 
                 # Show search status if there's a current search
                 if search_string and search_matches:
@@ -915,13 +938,31 @@ def show_logs(tui, stdscr, container):
                 if search_string and search_matches:
                     highlight_search_matches(pad, line_positions, tui.wrap_log_lines, w, search_matches, current_match)
                 
-                # Always refresh the pad
-                try:
-                    pad.refresh(pos, h_scroll, 2, 0, h-2, w-2)
+                # Display empty state message if filtering and no logs
+                if filtering_active and not logs:
+                    # Clear the content area
+                    for i in range(2, h-2):
+                        safe_addstr(stdscr, i, 0, " " * (w-1))
+                    
+                    # Show waiting message
+                    empty_msg1 = f"No logs matching filter: '{filter_string}'"
+                    empty_msg2 = "Waiting for matching logs..."
+                    empty_msg3 = "(Press \\ to change filter or ESC to clear)"
+                    
+                    center_y = h // 2
+                    safe_addstr(stdscr, center_y - 1, (w - len(empty_msg1)) // 2, empty_msg1, curses.A_BOLD)
+                    safe_addstr(stdscr, center_y, (w - len(empty_msg2)) // 2, empty_msg2, curses.A_DIM)
+                    safe_addstr(stdscr, center_y + 1, (w - len(empty_msg3)) // 2, empty_msg3, curses.A_DIM)
+                    
                     stdscr.refresh()
-                except curses.error:
-                    # Handle potential pad errors
-                    pass
+                else:
+                    # Always refresh the pad
+                    try:
+                        pad.refresh(pos, h_scroll, 2, 0, h-2, w-2)
+                        stdscr.refresh()
+                    except curses.error:
+                        # Handle potential pad errors
+                        pass
                 
                 last_display_time = current_time
             
@@ -980,6 +1021,17 @@ def show_logs(tui, stdscr, container):
                         header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator + filter_indicator
                         safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
                         stdscr.attroff(curses.color_pair(5))
+                        
+                        # Update footer based on filter state
+                        if filtering_active:
+                            if tui.wrap_log_lines:
+                                footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                            else:
+                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                            
+                            stdscr.attron(curses.color_pair(6))
+                            safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
+                            stdscr.attroff(curses.color_pair(6))
                         
                         stdscr.refresh()
                     elif ch in (ord('n'), ord('N')):  # Toggle normalization or next/prev search
@@ -1069,7 +1121,12 @@ def show_logs(tui, stdscr, container):
                         actual_lines_count = pad_info['actual_lines']
                         
                         # Update footer immediately to show horizontal scroll keys if unwrapped
-                        if tui.wrap_log_lines:
+                        if filtering_active:
+                            if tui.wrap_log_lines:
+                                footer_text = " ↑/↓:Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                            else:
+                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                        elif tui.wrap_log_lines:
                             footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
                         else:
                             footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | /:Search | \\:Filter | ESC:Back "
@@ -1179,7 +1236,50 @@ def show_logs(tui, stdscr, container):
                         except curses.error:
                             pass
                     elif ch in (27, ord('q'), ord('Q')):  # ESC or Q to exit
-                        running = False
+                        # If filtering is active and ESC is pressed, clear the filter first
+                        if ch == 27 and filtering_active:
+                            filtering_active = False
+                            filter_string = ""
+                            logs = original_logs
+                            
+                            # Rebuild pad with all logs
+                            pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
+                            pad = pad_info['pad']
+                            line_positions = pad_info['line_positions']
+                            actual_lines_count = pad_info['actual_lines']
+                            
+                            # Update line count
+                            last_logical_lines_count = len(logs)
+                            
+                            # Apply search highlighting if there's a search pattern
+                            if search_string:
+                                search_result = search_and_highlight(pad, logs, search_string, line_positions, w, case_sensitive, pos)
+                                search_matches = search_result['matches']
+                                current_match = search_result['current_match']
+                                highlight_search_matches(pad, line_positions, tui.wrap_log_lines, w, search_matches, current_match)
+                            
+                            # Update header without filter info
+                            stdscr.attron(curses.color_pair(5))
+                            safe_addstr(stdscr, 0, 0, " " * w)
+                            normalized_indicator = " [NORMALIZED]" if tui.normalize_logs else " [RAW]"
+                            wrap_indicator = " [WRAP]" if tui.wrap_log_lines else " [NOWRAP]"
+                            search_indicator = f" [SEARCH: {search_string}]" if search_string else ""
+                            header_text = f" Logs: {container.name} " + (" [FOLLOW]" if follow_mode else " [STATIC]") + normalized_indicator + wrap_indicator + search_indicator
+                            safe_addstr(stdscr, 0, (w-len(header_text))//2, header_text, curses.color_pair(5) | curses.A_BOLD)
+                            stdscr.attroff(curses.color_pair(5))
+                            
+                            # Clear filter info from status line
+                            safe_addstr(stdscr, 1, 0, " " * 30)
+                            
+                            # Show search status if there's a current search
+                            if search_string and search_matches:
+                                match_info = f" {current_match + 1}/{len(search_matches)} matches "
+                                safe_addstr(stdscr, 1, 0, match_info, curses.A_BOLD)
+                            
+                            # Force refresh
+                            stdscr.refresh()
+                        else:
+                            running = False
     
     except Exception as e:
         # Show error and wait for key
