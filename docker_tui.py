@@ -16,57 +16,154 @@ import concurrent.futures
 from collections import defaultdict
 
 # Import from other modules
-from utils import safe_addstr, format_column, format_datetime, format_timedelta, format_bytes
+from utils import safe_addstr, format_column, format_datetime, format_timedelta, format_bytes, get_speed_color
 from config import load_config, save_config
 from stats import schedule_stats_collection
 from container_actions import show_menu, execute_action
 
 # Batch stats collection via docker stats CLI
 import subprocess
+import re
+
+def parse_docker_io_string(io_string):
+    """Parse Docker I/O string like '1.23GB / 4.56GB' and return tuple of bytes"""
+    if not io_string or io_string == '-' or io_string == '--':
+        return 0, 0
+    
+    # Parse strings like "1.23GB / 4.56GB" or "123MB / 456MB"
+    parts = io_string.split(' / ')
+    if len(parts) != 2:
+        # Try without spaces
+        parts = io_string.split('/')
+        if len(parts) != 2:
+            return 0, 0
+    
+    def parse_size(size_str):
+        size_str = size_str.strip()
+        # Handle kiB, MiB, GiB formats as well
+        match = re.match(r'([\d.]+)\s*([KMGTP]i?B)?', size_str, re.IGNORECASE)
+        if not match:
+            return 0
+        
+        value = float(match.group(1))
+        unit = match.group(2) or 'B'
+        
+        # Handle both binary (KiB) and decimal (KB) units
+        multipliers = {
+            'B': 1, 'KB': 1024, 'MB': 1024**2, 
+            'GB': 1024**3, 'TB': 1024**4, 'PB': 1024**5,
+            'KIB': 1024, 'MIB': 1024**2, 
+            'GIB': 1024**3, 'TIB': 1024**4, 'PIB': 1024**5
+        }
+        
+        unit_upper = unit.upper()
+        return int(value * multipliers.get(unit_upper, 1))
+    
+    try:
+        rx = parse_size(parts[0])
+        tx = parse_size(parts[1])
+        return rx, tx
+    except:
+        return 0, 0
 
 def schedule_stats_collection(tui, containers):
-    """Batch-collect stats for all running containers via docker stats CLI, mapping short IDs to full IDs."""
+    """Batch-collect stats for all running containers via docker stats CLI"""
     if not containers:
         return
-    id_map = {c.id[:12]: c.id for c in containers}
+    
+    # Only collect stats for running containers
+    running_containers = [c for c in containers if c.status == 'running']
+    if not running_containers:
+        return
+    
+    # Create ID mapping
+    id_map = {c.id[:12]: c.id for c in running_containers}
+    
+    # Get stats from docker
     fmt = (
         "{{.Container}}|{{.Name}}|{{.CPUPerc}}|"
         "{{.MemPerc}}|{{.NetIO}}|{{.BlockIO}}"
     )
-    cmd = ["docker", "stats", "--no-stream", "--format", fmt]
+    cmd = ["docker", "stats", "--no-stream", "--format", fmt] + [c.id[:12] for c in running_containers]
+    
     try:
-        output = subprocess.check_output(cmd, text=True)
-        new_cache = {}
+        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
         now = time.time()
-        for line in output.splitlines():
+        
+        for line in output.strip().splitlines():
             parts = line.split("|")
             if len(parts) != 6:
                 continue
+                
             short_id, name, cpu, mem, netio, blockio = parts
             full_id = id_map.get(short_id)
             if not full_id:
                 continue
+                
+            # Parse CPU percentage
             try:
-                cpu_pct = float(cpu.strip("%"))
+                cpu_pct = float(cpu.strip().rstrip('%'))
             except ValueError:
                 cpu_pct = 0.0
+                
+            # Parse memory percentage
             try:
-                mem_pct = float(mem.strip("%"))
+                mem_pct = float(mem.strip().rstrip('%'))
             except ValueError:
                 mem_pct = 0.0
-            new_cache[full_id] = {
-                "cpu": cpu_pct,
-                "mem": mem_pct,
-                "net_in_rate": 0,
-                "net_out_rate": 0,
-                "net_in": 0,
-                "net_out": 0,
-                "time": now
-            }
-        with tui.stats_lock:
-            tui.stats_cache.clear()
-            tui.stats_cache.update(new_cache)
+            
+            # Parse network I/O
+            net_rx, net_tx = parse_docker_io_string(netio)
+            
+            # Parse block I/O
+            block_read, block_write = parse_docker_io_string(blockio)
+            
+            # Get previous stats for rate calculation
+            with tui.stats_lock:
+                prev_stats = tui.stats_cache.get(full_id, {})
+                prev_time = prev_stats.get('time', now - 1)  # Default to 1 second ago
+                prev_net_rx = prev_stats.get('net_rx', net_rx)
+                prev_net_tx = prev_stats.get('net_tx', net_tx)
+                prev_block_read = prev_stats.get('block_read', block_read)
+                prev_block_write = prev_stats.get('block_write', block_write)
+            
+            # Calculate time difference
+            time_diff = now - prev_time
+            
+            # Calculate rates only if we have a meaningful time difference and values increased
+            if time_diff >= 0.5:  # At least 0.5 seconds
+                net_rx_rate = max(0, (net_rx - prev_net_rx) / time_diff) if net_rx >= prev_net_rx else 0
+                net_tx_rate = max(0, (net_tx - prev_net_tx) / time_diff) if net_tx >= prev_net_tx else 0
+                block_read_rate = max(0, (block_read - prev_block_read) / time_diff) if block_read >= prev_block_read else 0
+                block_write_rate = max(0, (block_write - prev_block_write) / time_diff) if block_write >= prev_block_write else 0
+            else:
+                # Keep previous rates if time difference is too small
+                net_rx_rate = prev_stats.get('net_in_rate', 0)
+                net_tx_rate = prev_stats.get('net_out_rate', 0)
+                block_read_rate = prev_stats.get('block_read_rate', 0)
+                block_write_rate = prev_stats.get('block_write_rate', 0)
+            
+            # Update cache
+            with tui.stats_lock:
+                tui.stats_cache[full_id] = {
+                    "cpu": cpu_pct,
+                    "mem": mem_pct,
+                    "net_rx": net_rx,
+                    "net_tx": net_tx,
+                    "net_in_rate": net_rx_rate,
+                    "net_out_rate": net_tx_rate,
+                    "block_read": block_read,
+                    "block_write": block_write,
+                    "block_read_rate": block_read_rate,
+                    "block_write_rate": block_write_rate,
+                    "time": now
+                }
+                
+    except subprocess.CalledProcessError:
+        # Docker stats failed - maybe no running containers
+        pass
     except Exception:
+        # Other errors - silently ignore
         pass
 
 
@@ -118,6 +215,36 @@ class DockerTUI:
                     os.chmod(self.normalize_logs_script, 0o755)
                 except:
                     pass
+        
+        # Sorting
+        self.sort_column = 0  # Default sort by name
+        self.sort_reverse = False
+        
+        # Filtering
+        self.filter_string = ""
+        self.filter_mode = False
+        self.filtered_containers = []
+        
+        # Color pairs for speed indicators
+        self.init_speed_colors()
+    
+    def init_speed_colors(self):
+        """Initialize color pairs for speed indicators"""
+        try:
+            # Speed color pairs (starting from 11)
+            curses.init_pair(11, curses.COLOR_GREEN, curses.COLOR_BLACK)    # KB/s
+            curses.init_pair(12, curses.COLOR_YELLOW, curses.COLOR_BLACK)   # MB/s
+            curses.init_pair(13, 208, curses.COLOR_BLACK)  # Dark orange for 300MB/s+ (color 208 is orange)
+            curses.init_pair(14, curses.COLOR_RED, curses.COLOR_BLACK)      # GB/s
+        except:
+            # Fallback if terminal doesn't support 256 colors
+            try:
+                curses.init_pair(11, curses.COLOR_GREEN, curses.COLOR_BLACK)
+                curses.init_pair(12, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+                curses.init_pair(13, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Use yellow instead
+                curses.init_pair(14, curses.COLOR_RED, curses.COLOR_BLACK)
+            except:
+                pass
 
     def fetch_containers(self):
         """Fetch container list with throttling"""
@@ -126,18 +253,90 @@ class DockerTUI:
             if current_time - self.last_container_fetch >= self.container_fetch_interval:
                 try:
                     containers = self.client.containers.list(all=True)
-                    # Sort containers by name
-                    self.containers = sorted(containers, key=lambda c: c.name.lower())
+                    # Sort containers by current sort settings
+                    self.containers = self.sort_containers(containers)
                     self.last_container_fetch = current_time
+                    
+                    # Clear stats for stopped containers
+                    with self.stats_lock:
+                        running_ids = {c.id for c in containers if c.status == 'running'}
+                        stopped_ids = [cid for cid in self.stats_cache.keys() if cid not in running_ids]
+                        for cid in stopped_ids:
+                            # Reset rates to 0 for stopped containers
+                            if cid in self.stats_cache:
+                                self.stats_cache[cid]['net_in_rate'] = 0
+                                self.stats_cache[cid]['net_out_rate'] = 0
+                                self.stats_cache[cid]['block_read_rate'] = 0
+                                self.stats_cache[cid]['block_write_rate'] = 0
+                                self.stats_cache[cid]['cpu'] = 0
+                                self.stats_cache[cid]['mem'] = 0
+                    
+                    # Apply filter
+                    self.apply_filter()
                     
                     # Schedule stats collection for all running containers
                     running_containers = [c for c in self.containers if c.status == 'running']
-                    self.executor.submit(schedule_stats_collection, self, running_containers)
+                    if running_containers:
+                        self.executor.submit(schedule_stats_collection, self, running_containers)
                     
                 except docker.errors.DockerException:
                     # Keep existing containers if fetch fails
                     pass
         return self.containers
+    
+    def sort_containers(self, containers):
+        """Sort containers based on current sort column and direction"""
+        if not containers:
+            return containers
+        
+        # Define sort key functions for each column
+        def get_sort_key(container):
+            with self.stats_lock:
+                stats = self.stats_cache.get(container.id, {})
+            
+            # Find the actual column name to handle dynamic column order
+            if self.sort_column < len(self.columns):
+                col_name = self.columns[self.sort_column]['name']
+                
+                if col_name == 'NAME':
+                    return container.name.lower()
+                elif col_name == 'IMAGE':
+                    return container.image.tags[0].lower() if container.image.tags else ''
+                elif col_name == 'STATUS':
+                    return container.status.lower()
+                elif col_name == 'CPU%':
+                    return stats.get('cpu', 0)
+                elif col_name == 'MEM%':
+                    return stats.get('mem', 0)
+                elif col_name == 'NET I/O':
+                    return stats.get('net_in_rate', 0) + stats.get('net_out_rate', 0)
+                elif col_name == 'DISK I/O':
+                    return stats.get('block_read_rate', 0) + stats.get('block_write_rate', 0)
+                elif col_name == 'CREATED AT':
+                    return container.attrs.get('Created', '')
+                elif col_name == 'UPTIME':
+                    if container.attrs.get('State', {}).get('Running'):
+                        try:
+                            start = datetime.datetime.fromisoformat(container.attrs['State']['StartedAt'][:-1])
+                            return (datetime.datetime.utcnow() - start).total_seconds()
+                        except:
+                            return 0
+                    return 0
+            return ''
+        
+        return sorted(containers, key=get_sort_key, reverse=self.sort_reverse)
+    
+    def apply_filter(self):
+        """Apply filter to containers list"""
+        if not self.filter_string:
+            self.filtered_containers = self.containers
+        else:
+            filter_lower = self.filter_string.lower()
+            self.filtered_containers = [
+                c for c in self.containers 
+                if filter_lower in c.name.lower() or
+                   (c.image.tags and filter_lower in c.image.tags[0].lower())
+            ]
     
     def get_column_positions(self, screen_width):
         """Calculate column positions based on widths and screen size"""
@@ -181,28 +380,40 @@ class DockerTUI:
         
         return positions
     
-    def get_column_at_position(self, x):
+    def get_column_at_position(self, x, screen_width):
         """Find which column contains the given x position"""
-        positions = self.get_column_positions(9999)  # Large width to get all positions
+        positions = self.get_column_positions(screen_width)
         
-        for i in range(len(positions) - 1):
-            if positions[i] <= x < positions[i+1]:
-                return i
+        for i in range(len(self.columns)):
+            if i < len(positions) - 1:
+                # Check if x is within this column's range
+                start = positions[i]
+                end = positions[i + 1]
+                if self.show_column_separators and i < len(self.columns) - 1:
+                    end -= len(self.column_separator)
+                
+                if start <= x < end:
+                    return i
         
+        # Check last column
+        if len(positions) > 0 and x >= positions[-1]:
+            return len(self.columns) - 1
+            
         return -1
     
-    def is_separator_position(self, x):
+    def is_separator_position(self, x, screen_width):
         """Check if position is a column separator"""
         if not self.show_column_separators:
             return False
             
-        positions = self.get_column_positions(9999)
+        positions = self.get_column_positions(screen_width)
         
         # Check if position is within 1 of any separator position
-        for i in range(len(positions) - 1):
-            sep_pos = positions[i] + self.columns[i].get('current_width', self.columns[i]['width']) - 1
-            if abs(x - sep_pos) <= 1:
-                return i
+        for i in range(len(self.columns) - 1):
+            if i + 1 < len(positions):
+                sep_pos = positions[i+1] - len(self.column_separator)
+                if abs(x - sep_pos) <= 1:
+                    return i
         
         return -1
 
@@ -223,6 +434,9 @@ class DockerTUI:
         curses.init_pair(8, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # resize handle
         curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_YELLOW)  # search highlight
         curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_GREEN)  # current search highlight
+        
+        # Initialize speed colors
+        self.init_speed_colors()
         
         # Enable mouse support with enhanced motion events
         curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
@@ -247,15 +461,42 @@ class DockerTUI:
             # Last time the screen was redrawn
             last_draw_time = 0
             draw_interval = 0.2  # Screen refresh rate in seconds (faster)
+            
+            # Last time stats were collected
+            last_stats_time = 0
+            stats_interval = 1.0  # Collect stats every second
 
             while self.running:
                 # Handle key presses immediately for responsiveness
                 key = stdscr.getch()
                 current_time = time.time()
                 
-                if key != -1:
-                    # Process key
-                    if key == curses.KEY_DOWN and self.selected < len(self.containers) - 1:
+                if self.filter_mode:
+                    # Handle filter input
+                    if key == 27:  # ESC - exit filter mode
+                        self.filter_mode = False
+                        curses.curs_set(0)
+                    elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:
+                        if self.filter_string:
+                            self.filter_string = self.filter_string[:-1]
+                            self.apply_filter()
+                            # Reset selection if needed
+                            if self.selected >= len(self.filtered_containers):
+                                self.selected = max(0, len(self.filtered_containers) - 1)
+                    elif key == 10:  # Enter - confirm filter
+                        self.filter_mode = False
+                        curses.curs_set(0)
+                    elif 32 <= key < 127:  # Printable characters
+                        self.filter_string += chr(key)
+                        self.apply_filter()
+                        # Reset selection if needed
+                        if self.selected >= len(self.filtered_containers):
+                            self.selected = max(0, len(self.filtered_containers) - 1)
+                    last_draw_time = 0  # Force redraw
+                    
+                elif key != -1:
+                    # Process key in normal mode
+                    if key == curses.KEY_DOWN and self.selected < len(self.filtered_containers) - 1:
                         self.selected += 1
                         # Adjust scroll if selected container is outside view
                         visible_rows = h - 3  # Header and footer rows
@@ -268,29 +509,73 @@ class DockerTUI:
                         if self.selected < self.scroll_offset:
                             self.scroll_offset = self.selected
                         last_draw_time = 0  # Redraw immediately
+                    elif key == curses.KEY_NPAGE:  # Page Down
+                        visible_rows = h - 3
+                        self.selected = min(len(self.filtered_containers) - 1, self.selected + visible_rows)
+                        if self.selected >= self.scroll_offset + visible_rows:
+                            self.scroll_offset = self.selected - visible_rows + 1
+                        last_draw_time = 0
+                    elif key == curses.KEY_PPAGE:  # Page Up
+                        visible_rows = h - 3
+                        self.selected = max(0, self.selected - visible_rows)
+                        if self.selected < self.scroll_offset:
+                            self.scroll_offset = self.selected
+                        last_draw_time = 0
+                    elif key == ord('\\'):  # Start filter mode (backslash)
+                        self.filter_mode = True
+                        curses.curs_set(1)
+                        last_draw_time = 0
+                    elif key == 27 and self.filter_string:  # ESC - clear filter
+                        self.filter_string = ""
+                        self.apply_filter()
+                        last_draw_time = 0
                     elif key == curses.KEY_MOUSE:
                         try:
                             _, mx, my, _, button_state = curses.getmouse()
                             
+                            # Check if click was on header row
+                            if my == 0 and button_state & curses.BUTTON1_CLICKED:
+                                # Find which column was clicked
+                                col_idx = self.get_column_at_position(mx, w)
+                                if col_idx >= 0:
+                                    # Toggle sort
+                                    if self.sort_column == col_idx:
+                                        self.sort_reverse = not self.sort_reverse
+                                    else:
+                                        self.sort_column = col_idx
+                                        self.sort_reverse = False
+                                    
+                                    # Re-sort containers
+                                    self.containers = self.sort_containers(self.containers)
+                                    self.apply_filter()
+                                    last_draw_time = 0
+                            
                             # Check if click was on a container row
-                            row_idx = my - 1 + self.scroll_offset  # Adjust for scroll offset
-                            if my > 0 and my < h - 1 and row_idx < len(self.containers):
-                                # Select the clicked container
-                                old_selection = self.selected
-                                self.selected = row_idx
-                                if old_selection != self.selected:
-                                    last_draw_time = 0  # Redraw immediately
-                                elif self.containers:
-                                    # Double click or click on selection -> show menu
-                                    action_key = show_menu(self, stdscr, self.containers[self.selected])
-                                    execute_action(self, stdscr, self.containers[self.selected], action_key)
+                            elif my > 0 and my < h - 1:
+                                # Calculate content area start
+                                content_start = 2 if self.filter_mode or self.filter_string else 1
+                                
+                                # Only process if click is in content area
+                                if my >= content_start:
+                                    row_idx = my - content_start + self.scroll_offset  # Adjust for scroll offset and header(s)
+                                    if row_idx < len(self.filtered_containers):
+                                        # Select the clicked container
+                                        old_selection = self.selected
+                                        self.selected = row_idx
+                                        if old_selection != self.selected:
+                                            last_draw_time = 0  # Redraw immediately
+                                        elif self.filtered_containers:
+                                            # Double click or click on selection -> show menu
+                                            container = self.filtered_containers[self.selected]
+                                            action_key = show_menu(self, stdscr, container)
+                                            execute_action(self, stdscr, container, action_key)
                         except curses.error:
                             # Error getting mouse event
                             pass
-                    elif key in (ord('l'), ord('L')) and self.containers:
+                    elif key in (ord('l'), ord('L')) and self.filtered_containers:
                         # Import here to avoid circular imports
                         import log_view
-                        log_view.show_logs(self, stdscr, self.containers[self.selected])
+                        log_view.show_logs(self, stdscr, self.filtered_containers[self.selected])
                     elif key in (ord('n'), ord('N')):
                         # Toggle normalization setting globally
                         self.normalize_logs = not self.normalize_logs
@@ -299,14 +584,22 @@ class DockerTUI:
                         # Toggle line wrapping setting globally
                         self.wrap_log_lines = not self.wrap_log_lines
                         last_draw_time = 0  # Force redraw to update status
-                    elif key in (10, curses.KEY_ENTER, curses.KEY_RIGHT) and self.containers:
-                        action_key = show_menu(self, stdscr, self.containers[self.selected])
-                        execute_action(self, stdscr, self.containers[self.selected], action_key)
+                    elif key in (10, curses.KEY_ENTER, curses.KEY_RIGHT) and self.filtered_containers:
+                        container = self.filtered_containers[self.selected]
+                        action_key = show_menu(self, stdscr, container)
+                        execute_action(self, stdscr, container, action_key)
                     elif key in (ord('q'), ord('Q')):
                         self.running = False
                 
                 # Fetch containers in the background (throttled)
                 self.fetch_containers()
+                
+                # Collect stats periodically
+                if current_time - last_stats_time >= stats_interval:
+                    running_containers = [c for c in self.containers if c.status == 'running']
+                    if running_containers:
+                        self.executor.submit(schedule_stats_collection, self, running_containers)
+                    last_stats_time = current_time
                 
                 # Only redraw the screen periodically to reduce CPU usage
                 if current_time - last_draw_time >= draw_interval:
@@ -327,9 +620,13 @@ class DockerTUI:
                     safe_addstr(stdscr, 0, w - len(status_text) - 2, status_text, 
                                    curses.color_pair(5) | curses.A_BOLD)
                     
-                    # Draw headers
+                    # Draw headers with sort indicators
                     for i, col in enumerate(self.columns):
                         header = col['name']
+                        # Add sort indicator
+                        if i == self.sort_column:
+                            header += " ▼" if self.sort_reverse else " ▲"
+                        
                         if i < len(col_positions) - 1:
                             # Calculate column width including separator
                             if i < len(self.columns) - 1 and self.show_column_separators:
@@ -350,16 +647,34 @@ class DockerTUI:
                     
                     stdscr.attroff(curses.color_pair(5))
 
+                    # Draw filter input if in filter mode
+                    if self.filter_mode:
+                        filter_prompt = " Filter: "
+                        safe_addstr(stdscr, 1, 0, filter_prompt, curses.A_BOLD)
+                        safe_addstr(stdscr, 1, len(filter_prompt), self.filter_string)
+                        safe_addstr(stdscr, 1, len(filter_prompt) + len(self.filter_string), "_", curses.A_BLINK)
+                        stdscr.move(1, len(filter_prompt) + len(self.filter_string))
+                    elif self.filter_string:
+                        # Show active filter
+                        filter_info = f" Filtered: {len(self.filtered_containers)}/{len(self.containers)} (Press \\ to change, ESC to clear) "
+                        safe_addstr(stdscr, 1, 0, filter_info, curses.A_BOLD | curses.color_pair(3))
+
+                    # Calculate content area
+                    content_start = 2 if self.filter_mode or self.filter_string else 1
+                    
                     # Draw content
-                    if not self.containers:
-                        safe_addstr(stdscr, 2, 1, "No containers found.", curses.A_DIM)
+                    if not self.filtered_containers:
+                        if self.filter_string:
+                            safe_addstr(stdscr, content_start + 1, 1, "No containers match the filter.", curses.A_DIM)
+                        else:
+                            safe_addstr(stdscr, content_start + 1, 1, "No containers found.", curses.A_DIM)
                     else:
                         # Calculate visible area
-                        max_visible_containers = h - 3  # Minus header and footer rows
+                        max_visible_containers = h - content_start - 1  # Minus header(s) and footer
                         
                         # Ensure scroll offset is valid
-                        if self.scroll_offset > len(self.containers) - max_visible_containers:
-                            self.scroll_offset = max(0, len(self.containers) - max_visible_containers)
+                        if self.scroll_offset > len(self.filtered_containers) - max_visible_containers:
+                            self.scroll_offset = max(0, len(self.filtered_containers) - max_visible_containers)
                         
                         # Ensure selected container is visible
                         if self.selected < self.scroll_offset:
@@ -368,22 +683,22 @@ class DockerTUI:
                             self.scroll_offset = self.selected - max_visible_containers + 1
                         
                         # Draw scrollbar if needed
-                        if len(self.containers) > max_visible_containers:
+                        if len(self.filtered_containers) > max_visible_containers:
                             scrollbar_height = max_visible_containers
-                            scrollbar_pos = int((self.scroll_offset / max(1, len(self.containers) - max_visible_containers)) 
+                            scrollbar_pos = int((self.scroll_offset / max(1, len(self.filtered_containers) - max_visible_containers)) 
                                                 * (scrollbar_height - 1))
                             for i in range(scrollbar_height):
                                 if i == scrollbar_pos:
-                                    safe_addstr(stdscr, i + 1, w-1, "█")
+                                    safe_addstr(stdscr, i + content_start, w-1, "█")
                                 else:
-                                    safe_addstr(stdscr, i + 1, w-1, "│")
+                                    safe_addstr(stdscr, i + content_start, w-1, "│")
                         
                         # Draw visible containers
-                        for i in range(min(max_visible_containers, len(self.containers) - self.scroll_offset)):
+                        for i in range(min(max_visible_containers, len(self.filtered_containers) - self.scroll_offset)):
                             idx = i + self.scroll_offset
-                            y = i + 1  # Start at line 1 (after header)
+                            y = i + content_start  # Start after header(s)
                             
-                            c = self.containers[idx]
+                            c = self.filtered_containers[idx]
                             
                             # Get container data
                             attr = c.attrs
@@ -408,10 +723,13 @@ class DockerTUI:
                             cpu_pct = stats.get('cpu', 0)
                             mem_pct = stats.get('mem', 0)
                             
-                            # Format network I/O
+                            # Format network I/O with colors
                             net_in_rate = stats.get('net_in_rate', 0)
                             net_out_rate = stats.get('net_out_rate', 0)
-                            net_io = f"{format_bytes(net_in_rate, '/s')}↓ {format_bytes(net_out_rate, '/s')}↑"
+                            
+                            # Format disk I/O with colors
+                            disk_read_rate = stats.get('block_read_rate', 0)
+                            disk_write_rate = stats.get('block_write_rate', 0)
                             
                             # Format full creation date and time
                             created = format_datetime(attr.get('Created', ''))
@@ -425,12 +743,18 @@ class DockerTUI:
                                 except (ValueError, KeyError):
                                     pass
                             
-                            # Prepare row data
-                            row_data = [
-                                name, image, status, 
-                                f"{cpu_pct:.1f}", f"{mem_pct:.1f}", 
-                                net_io, created, uptime
-                            ]
+                            # Prepare row data for all columns
+                            row_data = {
+                                'NAME': name,
+                                'IMAGE': image,
+                                'STATUS': status,
+                                'CPU%': f"{cpu_pct:.1f}",
+                                'MEM%': f"{mem_pct:.1f}",
+                                'NET I/O': None,  # Handled specially
+                                'DISK I/O': None,  # Handled specially  
+                                'CREATED AT': created,
+                                'UPTIME': uptime
+                            }
                             
                             # Highlight selected row with visual indicator
                             if idx == self.selected:
@@ -443,19 +767,108 @@ class DockerTUI:
                             
                             # Draw each column with proper spacing
                             for i, col in enumerate(self.columns):
-                                if i < len(row_data):
-                                    col_text = row_data[i]
-                                    
+                                col_name = col['name']
+                                if i < len(col_positions) - 1:
                                     # Calculate column width
-                                    if i < len(col_positions) - 1:
-                                        # Get width from positions, accounting for separator
-                                        if i < len(self.columns) - 1 and self.show_column_separators:
-                                            col_width = col_positions[i+1] - col_positions[i] - len(self.column_separator)
+                                    if i < len(self.columns) - 1 and self.show_column_separators:
+                                        col_width = col_positions[i+1] - col_positions[i] - len(self.column_separator)
+                                    else:
+                                        col_width = col_positions[i+1] - col_positions[i]
+                                    
+                                    # Handle special columns
+                                    if col_name == 'NET I/O':
+                                        # Draw NET I/O with colors
+                                        if idx == self.selected:
+                                            # For selected row, use selection color
+                                            net_io = f"{format_bytes(net_in_rate, '/s')}↓ {format_bytes(net_out_rate, '/s')}↑"
+                                            safe_addstr(stdscr, y, col_positions[i], 
+                                                       format_column(net_io, col_width, col['align']), 
+                                                       curses.color_pair(1))
                                         else:
-                                            col_width = col_positions[i+1] - col_positions[i]
+                                            # Draw with colors
+                                            x_pos = col_positions[i]
+                                            if col['align'] == 'right':
+                                                # For right-aligned, we need to calculate positions
+                                                down_text = f"{format_bytes(net_in_rate, '/s')}↓"
+                                                up_text = f"{format_bytes(net_out_rate, '/s')}↑"
+                                                
+                                                # Get color for each part
+                                                down_color = get_speed_color(net_in_rate)
+                                                up_color = get_speed_color(net_out_rate)
+                                                
+                                                # Calculate total width needed
+                                                total_len = len(down_text) + 1 + len(up_text)  # +1 for space
+                                                
+                                                # Start position for right alignment
+                                                start_x = x_pos + col_width - total_len - 1
+                                                
+                                                # Draw download rate
+                                                safe_addstr(stdscr, y, start_x, down_text, curses.color_pair(down_color))
+                                                safe_addstr(stdscr, y, start_x + len(down_text), " ")
+                                                # Draw upload rate
+                                                safe_addstr(stdscr, y, start_x + len(down_text) + 1, up_text, curses.color_pair(up_color))
+                                            else:
+                                                # Left aligned
+                                                down_text = f"{format_bytes(net_in_rate, '/s')}↓"
+                                                up_text = f"{format_bytes(net_out_rate, '/s')}↑"
+                                                
+                                                # Get color for each part
+                                                down_color = get_speed_color(net_in_rate)
+                                                up_color = get_speed_color(net_out_rate)
+                                                
+                                                safe_addstr(stdscr, y, x_pos, down_text, curses.color_pair(down_color))
+                                                safe_addstr(stdscr, y, x_pos + len(down_text), " ")
+                                                safe_addstr(stdscr, y, x_pos + len(down_text) + 1, up_text, curses.color_pair(up_color))
+                                    
+                                    elif col_name == 'DISK I/O':
+                                        # Draw DISK I/O with colors
+                                        if idx == self.selected:
+                                            # For selected row, use selection color
+                                            disk_io = f"{format_bytes(disk_read_rate, '/s')}R {format_bytes(disk_write_rate, '/s')}W"
+                                            safe_addstr(stdscr, y, col_positions[i], 
+                                                       format_column(disk_io, col_width, col['align']), 
+                                                       curses.color_pair(1))
+                                        else:
+                                            # Draw with colors
+                                            x_pos = col_positions[i]
+                                            if col['align'] == 'right':
+                                                # For right-aligned, calculate positions
+                                                read_text = f"{format_bytes(disk_read_rate, '/s')}R"
+                                                write_text = f"{format_bytes(disk_write_rate, '/s')}W"
+                                                
+                                                # Get color for each part
+                                                read_color = get_speed_color(disk_read_rate)
+                                                write_color = get_speed_color(disk_write_rate)
+                                                
+                                                # Calculate total width needed
+                                                total_len = len(read_text) + 1 + len(write_text)  # +1 for space
+                                                
+                                                # Start position for right alignment
+                                                start_x = x_pos + col_width - total_len - 1
+                                                
+                                                # Draw read rate
+                                                safe_addstr(stdscr, y, start_x, read_text, curses.color_pair(read_color))
+                                                safe_addstr(stdscr, y, start_x + len(read_text), " ")
+                                                # Draw write rate
+                                                safe_addstr(stdscr, y, start_x + len(read_text) + 1, write_text, curses.color_pair(write_color))
+                                            else:
+                                                # Left aligned
+                                                read_text = f"{format_bytes(disk_read_rate, '/s')}R"
+                                                write_text = f"{format_bytes(disk_write_rate, '/s')}W"
+                                                
+                                                # Get color for each part
+                                                read_color = get_speed_color(disk_read_rate)
+                                                write_color = get_speed_color(disk_write_rate)
+                                                
+                                                safe_addstr(stdscr, y, x_pos, read_text, curses.color_pair(read_color))
+                                                safe_addstr(stdscr, y, x_pos + len(read_text), " ")
+                                                safe_addstr(stdscr, y, x_pos + len(read_text) + 1, write_text, curses.color_pair(write_color))
+                                    
+                                    elif col_name in row_data and row_data[col_name] is not None:
+                                        col_text = row_data[col_name]
                                         
                                         # Apply status color only to the status column when not selected
-                                        attr = status_color if i == 2 and idx != self.selected else curses.A_NORMAL
+                                        attr = status_color if col_name == 'STATUS' and idx != self.selected else curses.A_NORMAL
                                         
                                         if idx == self.selected:
                                             attr = curses.color_pair(1)  # Use selection color for all columns
@@ -463,19 +876,19 @@ class DockerTUI:
                                         # Draw column content
                                         safe_addstr(stdscr, y, col_positions[i], 
                                                        format_column(col_text, col_width, col['align']), attr)
-                                        
-                                        # Draw separator after column (except last)
-                                        if self.show_column_separators and i < len(self.columns) - 1:
-                                            sep_pos = col_positions[i] + col_width
-                                            sep_attr = curses.color_pair(1) if idx == self.selected else curses.A_NORMAL
-                                            safe_addstr(stdscr, y, sep_pos, self.column_separator, sep_attr)
+                                    
+                                    # Draw separator after column (except last)
+                                    if self.show_column_separators and i < len(self.columns) - 1:
+                                        sep_pos = col_positions[i] + col_width
+                                        sep_attr = curses.color_pair(1) if idx == self.selected else curses.A_NORMAL
+                                        safe_addstr(stdscr, y, sep_pos, self.column_separator, sep_attr)
                             
                             if idx == self.selected:
                                 stdscr.attroff(curses.color_pair(1))
 
                     # Draw footer with help text
                     stdscr.attron(curses.color_pair(6))
-                    footer_text = " ↑/↓/Click:Navigate | Enter/Click:Menu | L:Logs | N:Toggle Normalize | W:Toggle Wrap | Q:Quit "
+                    footer_text = " ↑/↓/PgUp/PgDn:Navigate | Enter:Menu | L:Logs | \\:Filter | N:Normalize | W:Wrap | Q:Quit "
                     footer_fill = " " * (w - len(footer_text))
                     safe_addstr(stdscr, h-1, 0, footer_text + footer_fill, curses.color_pair(6))
                     stdscr.attroff(curses.color_pair(6))

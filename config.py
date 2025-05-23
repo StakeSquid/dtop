@@ -18,6 +18,7 @@ DEFAULT_COLUMNS = [
     {"name": "CPU%", "width": 8, "min_width": 7, "weight": 0, "align": "right"},
     {"name": "MEM%", "width": 8, "min_width": 7, "weight": 0, "align": "right"},
     {"name": "NET I/O", "width": 20, "min_width": 16, "weight": 0, "align": "right"},
+    {"name": "DISK I/O", "width": 20, "min_width": 16, "weight": 0, "align": "right"},
     {"name": "CREATED AT", "width": 21, "min_width": 19, "weight": 0, "align": "left"},
     {"name": "UPTIME", "width": 12, "min_width": 8, "weight": 0, "align": "right"}
 ]
@@ -29,6 +30,20 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f:
                 config = json.load(f)
                 columns = config.get('columns', DEFAULT_COLUMNS)
+                
+                # Check if DISK I/O column exists, if not add it
+                has_disk_io = any(col['name'] == 'DISK I/O' for col in columns)
+                if not has_disk_io:
+                    # Find position after NET I/O
+                    net_io_idx = next((i for i, col in enumerate(columns) if col['name'] == 'NET I/O'), -1)
+                    if net_io_idx >= 0:
+                        columns.insert(net_io_idx + 1, 
+                            {"name": "DISK I/O", "width": 20, "min_width": 16, "weight": 0, "align": "right"})
+                    else:
+                        # Add before CREATED AT
+                        created_idx = next((i for i, col in enumerate(columns) if col['name'] == 'CREATED AT'), len(columns))
+                        columns.insert(created_idx,
+                            {"name": "DISK I/O", "width": 20, "min_width": 16, "weight": 0, "align": "right"})
         else:
             columns = DEFAULT_COLUMNS.copy()
     except Exception:

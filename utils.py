@@ -22,6 +22,23 @@ def format_bytes(num_bytes, suffix='B'):
         num_bytes /= 1024.0
     return f"{num_bytes:.1f}Y{suffix}"
 
+def get_speed_color(bytes_per_sec):
+    """Get color pair for speed based on bytes per second
+    Returns curses color pair number:
+    - 11: Green for KB/s (< 1MB/s)
+    - 12: Yellow for MB/s (1MB/s - 300MB/s)
+    - 13: Dark orange for 300MB/s+ (300MB/s - 1GB/s)
+    - 14: Red for GB/s (>= 1GB/s)
+    """
+    if bytes_per_sec < 1024 * 1024:  # < 1 MB/s
+        return 11  # Green
+    elif bytes_per_sec < 300 * 1024 * 1024:  # < 300 MB/s
+        return 12  # Yellow
+    elif bytes_per_sec < 1024 * 1024 * 1024:  # < 1 GB/s
+        return 13  # Dark orange
+    else:  # >= 1 GB/s
+        return 14  # Red
+
 def format_datetime(dt_str):
     """Format ISO datetime string to human-readable format"""
     try:
