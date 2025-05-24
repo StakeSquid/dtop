@@ -133,7 +133,7 @@ class DockerTUI:
                     # Schedule stats collection for all running containers
                     running_containers = [c for c in self.containers if c.status == 'running']
                     if running_containers:
-                        self.executor.submit(schedule_stats_collection, self, running_containers)
+                        self.executor.submit(schedule_stats_collection_sync, self, running_containers)
                     
                 except docker.errors.DockerException:
                     # Keep existing containers if fetch fails
