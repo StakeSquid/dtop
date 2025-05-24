@@ -792,3 +792,7 @@ class DockerTUI:
             
             # Close executor
             self.executor.shutdown(wait=False)
+            
+            # Clean up stats collector
+            from stats import cleanup_stats_sync
+            cleanup_stats_sync()
