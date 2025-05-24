@@ -2,9 +2,12 @@
 
 A high-performance terminal UI for Docker container management with real-time monitoring and advanced log viewing.
 
-![Container list view](https://github.com/user-attachments/assets/1fabacfa-ff14-4792-9997-55d22f06f8f2)
-![Container action menu](https://github.com/user-attachments/assets/bd436854-c6b4-4bbe-898f-fd7b37f179e6)
-![Log viewer](https://github.com/user-attachments/assets/32ee2625-9390-43fe-ad59-1fac6bd93d12)
+<img width="1611" alt="Screenshot 2025-05-24 at 6 39 12 PM" src="https://github.com/user-attachments/assets/e5697f99-fdd4-4d41-bd69-02072db5385c" />
+<img width="1611" alt="Screenshot 2025-05-24 at 6 39 21 PM" src="https://github.com/user-attachments/assets/0694304e-f256-47b5-923b-5c05ed0035b7" />
+<img width="1611" alt="Screenshot 2025-05-24 at 6 39 48 PM" src="https://github.com/user-attachments/assets/df379064-9f33-48f7-9e8b-635723df6572" />
+<img width="1611" alt="Screenshot 2025-05-24 at 6 40 01 PM" src="https://github.com/user-attachments/assets/aeb20e8e-202c-49f8-bd09-7b563964bb9e" />
+
+
 
 ## Features
 
