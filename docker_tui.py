@@ -19,152 +19,8 @@ from collections import defaultdict
 from utils import safe_addstr, format_column, format_datetime, format_timedelta, format_bytes, get_speed_color
 from config import load_config, save_config
 from stats import schedule_stats_collection
+from stats import schedule_stats_collection_sync
 from container_actions import show_menu, execute_action
-
-# Batch stats collection via docker stats CLI
-import subprocess
-import re
-
-def parse_docker_io_string(io_string):
-    """Parse Docker I/O string like '1.23GB / 4.56GB' and return tuple of bytes"""
-    if not io_string or io_string == '-' or io_string == '--':
-        return 0, 0
-    
-    # Parse strings like "1.23GB / 4.56GB" or "123MB / 456MB"
-    parts = io_string.split(' / ')
-    if len(parts) != 2:
-        # Try without spaces
-        parts = io_string.split('/')
-        if len(parts) != 2:
-            return 0, 0
-    
-    def parse_size(size_str):
-        size_str = size_str.strip()
-        # Handle kiB, MiB, GiB formats as well
-        match = re.match(r'([\d.]+)\s*([KMGTP]i?B)?', size_str, re.IGNORECASE)
-        if not match:
-            return 0
-        
-        value = float(match.group(1))
-        unit = match.group(2) or 'B'
-        
-        # Handle both binary (KiB) and decimal (KB) units
-        multipliers = {
-            'B': 1, 'KB': 1024, 'MB': 1024**2, 
-            'GB': 1024**3, 'TB': 1024**4, 'PB': 1024**5,
-            'KIB': 1024, 'MIB': 1024**2, 
-            'GIB': 1024**3, 'TIB': 1024**4, 'PIB': 1024**5
-        }
-        
-        unit_upper = unit.upper()
-        return int(value * multipliers.get(unit_upper, 1))
-    
-    try:
-        rx = parse_size(parts[0])
-        tx = parse_size(parts[1])
-        return rx, tx
-    except:
-        return 0, 0
-
-def schedule_stats_collection(tui, containers):
-    """Batch-collect stats for all running containers via docker stats CLI"""
-    if not containers:
-        return
-    
-    # Only collect stats for running containers
-    running_containers = [c for c in containers if c.status == 'running']
-    if not running_containers:
-        return
-    
-    # Create ID mapping
-    id_map = {c.id[:12]: c.id for c in running_containers}
-    
-    # Get stats from docker
-    fmt = (
-        "{{.Container}}|{{.Name}}|{{.CPUPerc}}|"
-        "{{.MemPerc}}|{{.NetIO}}|{{.BlockIO}}"
-    )
-    cmd = ["docker", "stats", "--no-stream", "--format", fmt] + [c.id[:12] for c in running_containers]
-    
-    try:
-        output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
-        now = time.time()
-        
-        for line in output.strip().splitlines():
-            parts = line.split("|")
-            if len(parts) != 6:
-                continue
-                
-            short_id, name, cpu, mem, netio, blockio = parts
-            full_id = id_map.get(short_id)
-            if not full_id:
-                continue
-                
-            # Parse CPU percentage
-            try:
-                cpu_pct = float(cpu.strip().rstrip('%'))
-            except ValueError:
-                cpu_pct = 0.0
-                
-            # Parse memory percentage
-            try:
-                mem_pct = float(mem.strip().rstrip('%'))
-            except ValueError:
-                mem_pct = 0.0
-            
-            # Parse network I/O
-            net_rx, net_tx = parse_docker_io_string(netio)
-            
-            # Parse block I/O
-            block_read, block_write = parse_docker_io_string(blockio)
-            
-            # Get previous stats for rate calculation
-            with tui.stats_lock:
-                prev_stats = tui.stats_cache.get(full_id, {})
-                prev_time = prev_stats.get('time', now - 1)  # Default to 1 second ago
-                prev_net_rx = prev_stats.get('net_rx', net_rx)
-                prev_net_tx = prev_stats.get('net_tx', net_tx)
-                prev_block_read = prev_stats.get('block_read', block_read)
-                prev_block_write = prev_stats.get('block_write', block_write)
-            
-            # Calculate time difference
-            time_diff = now - prev_time
-            
-            # Calculate rates only if we have a meaningful time difference and values increased
-            if time_diff >= 0.5:  # At least 0.5 seconds
-                net_rx_rate = max(0, (net_rx - prev_net_rx) / time_diff) if net_rx >= prev_net_rx else 0
-                net_tx_rate = max(0, (net_tx - prev_net_tx) / time_diff) if net_tx >= prev_net_tx else 0
-                block_read_rate = max(0, (block_read - prev_block_read) / time_diff) if block_read >= prev_block_read else 0
-                block_write_rate = max(0, (block_write - prev_block_write) / time_diff) if block_write >= prev_block_write else 0
-            else:
-                # Keep previous rates if time difference is too small
-                net_rx_rate = prev_stats.get('net_in_rate', 0)
-                net_tx_rate = prev_stats.get('net_out_rate', 0)
-                block_read_rate = prev_stats.get('block_read_rate', 0)
-                block_write_rate = prev_stats.get('block_write_rate', 0)
-            
-            # Update cache
-            with tui.stats_lock:
-                tui.stats_cache[full_id] = {
-                    "cpu": cpu_pct,
-                    "mem": mem_pct,
-                    "net_rx": net_rx,
-                    "net_tx": net_tx,
-                    "net_in_rate": net_rx_rate,
-                    "net_out_rate": net_tx_rate,
-                    "block_read": block_read,
-                    "block_write": block_write,
-                    "block_read_rate": block_read_rate,
-                    "block_write_rate": block_write_rate,
-                    "time": now
-                }
-                
-    except subprocess.CalledProcessError:
-        # Docker stats failed - maybe no running containers
-        pass
-    except Exception:
-        # Other errors - silently ignore
-        pass
 
 
 class DockerTUI:
@@ -277,7 +133,7 @@ class DockerTUI:
                     # Schedule stats collection for all running containers
                     running_containers = [c for c in self.containers if c.status == 'running']
                     if running_containers:
-                        self.executor.submit(schedule_stats_collection, self, running_containers)
+                        self.executor.submit(schedule_stats_collection_sync, self, running_containers)
                     
                 except docker.errors.DockerException:
                     # Keep existing containers if fetch fails
@@ -628,7 +484,7 @@ class DockerTUI:
                 if current_time - last_stats_time >= stats_interval:
                     running_containers = [c for c in self.containers if c.status == 'running']
                     if running_containers:
-                        self.executor.submit(schedule_stats_collection, self, running_containers)
+                        self.executor.submit(schedule_stats_collection_sync, self, running_containers)
                     last_stats_time = current_time
                 
                 # Only redraw the screen periodically to reduce CPU usage
@@ -936,3 +792,7 @@ class DockerTUI:
             
             # Close executor
             self.executor.shutdown(wait=False)
+            
+            # Clean up stats collector
+            from stats import cleanup_stats_sync
+            cleanup_stats_sync()
