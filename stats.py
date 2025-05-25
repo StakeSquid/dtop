@@ -9,6 +9,7 @@ import asyncio
 import time
 import json
 import sys
+import os
 import threading
 from typing import Dict, Tuple, List, Optional
 from collections import defaultdict
@@ -296,17 +297,20 @@ class AsyncStatsCollector:
                     })
 
 
-# Global stats collector instance
+# Global stats collector instance and lock
 _stats_collector: Optional[AsyncStatsCollector] = None
 _stats_loop: Optional[asyncio.AbstractEventLoop] = None
 _stats_thread: Optional[threading.Thread] = None
+_stats_lock = threading.Lock()
+_stats_initialized = False
 
 
 async def initialize_stats_collector(tui):
     """Initialize the global stats collector."""
     global _stats_collector
-    _stats_collector = AsyncStatsCollector(tui)
-    await _stats_collector.__aenter__()
+    if _stats_collector is None:
+        _stats_collector = AsyncStatsCollector(tui)
+        await _stats_collector.__aenter__()
     return _stats_collector
 
 
@@ -328,29 +332,46 @@ async def schedule_stats_collection(tui, containers):
     try:
         await _stats_collector.collect_all_stats(containers)
     except Exception as e:
-        # Log error but don't crash
-        import sys
-        print(f"Stats collection error: {e}", file=sys.stderr)
+        # Only log error if it's not a shutdown-related error
+        if "cancelled" not in str(e).lower() and "closed" not in str(e).lower() and str(e).strip():
+            print(f"Stats collection error: {e}", file=sys.stderr)
+            # Only print traceback in debug mode
+            if os.environ.get('DEBUG'):
+                import traceback
+                print(traceback.format_exc(), file=sys.stderr)
 
 
 def _run_stats_loop():
     """Run the stats event loop in a dedicated thread."""
     global _stats_loop
-    asyncio.set_event_loop(_stats_loop)
-    _stats_loop.run_forever()
+    try:
+        asyncio.set_event_loop(_stats_loop)
+        _stats_loop.run_forever()
+    except Exception as e:
+        print(f"Stats loop error: {e}", file=sys.stderr)
+    finally:
+        # Clean up the loop
+        _stats_loop.close()
 
 
 def _ensure_stats_loop():
     """Ensure the stats event loop is running."""
-    global _stats_loop, _stats_thread
+    global _stats_loop, _stats_thread, _stats_initialized
     
-    if _stats_loop is None or not _stats_loop.is_running():
+    with _stats_lock:
+        # Check if already initialized
+        if _stats_initialized and _stats_thread and _stats_thread.is_alive():
+            return
+        
         # Create new event loop
         _stats_loop = asyncio.new_event_loop()
         
         # Start the loop in a daemon thread
         _stats_thread = threading.Thread(target=_run_stats_loop, daemon=True)
         _stats_thread.start()
+        
+        # Mark as initialized
+        _stats_initialized = True
         
         # Give the loop a moment to start
         time.sleep(0.1)
@@ -398,50 +419,62 @@ def schedule_stats_collection_sync(tui, containers):
         # Ensure the stats event loop is running
         _ensure_stats_loop()
         
-        # Reset the collector if the loop was recreated
+        # Initialize collector if needed
         if _stats_loop and not _stats_collector:
-            future = asyncio.run_coroutine_threadsafe(
-                initialize_stats_collector(tui), 
-                _stats_loop
-            )
-            future.result(timeout=5.0)
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    initialize_stats_collector(tui), 
+                    _stats_loop
+                )
+                future.result(timeout=5.0)
+            except Exception as e:
+                print(f"Failed to initialize stats collector: {e}", file=sys.stderr)
+                return
         
         # Schedule the stats collection in the dedicated loop
-        future = asyncio.run_coroutine_threadsafe(
-            schedule_stats_collection(tui, containers), 
-            _stats_loop
-        )
-        # Wait for completion with timeout
-        future.result(timeout=10.0)
+        if _stats_loop:
+            future = asyncio.run_coroutine_threadsafe(
+                schedule_stats_collection(tui, containers), 
+                _stats_loop
+            )
+            # Wait for completion with timeout
+            future.result(timeout=10.0)
     except Exception as e:
-        # Log error for debugging but don't crash
-        import sys
-        print(f"Stats collection sync error: {e}", file=sys.stderr)
+        # Only log error if it's not a cancellation during shutdown
+        if "cancelled" not in str(e).lower() and "closed" not in str(e).lower() and str(e).strip():
+            import traceback
+            print(f"Stats collection sync error: {e}", file=sys.stderr)
+            # Only print traceback in debug mode
+            if os.environ.get('DEBUG'):
+                print(traceback.format_exc(), file=sys.stderr)
 
 
 def cleanup_stats_sync():
     """Clean up the stats event loop and collector."""
-    global _stats_loop, _stats_thread, _stats_collector
+    global _stats_loop, _stats_thread, _stats_collector, _stats_initialized
     
-    if _stats_loop:
-        # Clean up the collector first
-        if _stats_collector:
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    cleanup_stats_collector(), 
-                    _stats_loop
-                )
-                future.result(timeout=5.0)
-            except:
-                pass
-        
-        # Stop the event loop
-        _stats_loop.call_soon_threadsafe(_stats_loop.stop)
-        
-        # Wait for thread to finish
-        if _stats_thread and _stats_thread.is_alive():
-            _stats_thread.join(timeout=2.0)
-        
-        _stats_loop = None
-        _stats_thread = None
-        _stats_collector = None
+    with _stats_lock:
+        if _stats_loop:
+            # Clean up the collector first
+            if _stats_collector:
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        cleanup_stats_collector(), 
+                        _stats_loop
+                    )
+                    future.result(timeout=5.0)
+                except Exception as e:
+                    print(f"Error cleaning up stats collector: {e}", file=sys.stderr)
+            
+            # Stop the event loop
+            _stats_loop.call_soon_threadsafe(_stats_loop.stop)
+            
+            # Wait for thread to finish
+            if _stats_thread and _stats_thread.is_alive():
+                _stats_thread.join(timeout=2.0)
+            
+            # Reset state
+            _stats_loop = None
+            _stats_thread = None
+            _stats_collector = None
+            _stats_initialized = False
