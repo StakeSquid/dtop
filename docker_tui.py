@@ -459,9 +459,9 @@ class DockerTUI:
                         import log_view
                         log_view.show_logs(self, stdscr, self.filtered_containers[self.selected])
                     elif key in (ord('i'), ord('I')) and self.filtered_containers:
-                        # NEW: Direct inspect shortcut
-                        from container_actions import show_inspect
-                        show_inspect(self, stdscr, self.filtered_containers[self.selected])
+                        # Direct inspect shortcut using new module
+                        import inspect_view
+                        inspect_view.show_inspect(self, stdscr, self.filtered_containers[self.selected])
                     elif key in (ord('n'), ord('N')):
                         # Toggle normalization setting globally
                         self.normalize_logs = not self.normalize_logs
