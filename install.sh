@@ -45,6 +45,7 @@ required_files=(
     "config.py"
     "utils.py"
     "normalize_logs.py"
+    "inspect_view.py"
 )
 
 # Check for curl or wget
