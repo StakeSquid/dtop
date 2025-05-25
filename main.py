@@ -31,8 +31,20 @@ Dependencies:
 import curses
 import docker
 import sys
+import atexit
+
+def cleanup():
+    """Cleanup function to ensure stats are properly cleaned up"""
+    try:
+        from stats import cleanup_stats_sync
+        cleanup_stats_sync()
+    except:
+        pass
 
 def main():
+    # Register cleanup function
+    atexit.register(cleanup)
+    
     # Determine the correct import paths
     import os
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -45,9 +57,15 @@ def main():
     except docker.errors.DockerException as e:
         print("Error connecting to Docker daemon:", e)
         print("Make sure Docker is running and you have access to /var/run/docker.sock")
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully
+        pass
     except Exception as e:
         print(f"Unexpected error: {e}")
         print("If the screen isn't restoring properly, try: reset")
+    finally:
+        # Ensure cleanup happens
+        cleanup()
 
 if __name__ == '__main__':
     main()
