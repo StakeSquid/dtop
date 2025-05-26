@@ -42,6 +42,10 @@ def cleanup():
         pass
 
 def main():
+    # ADDED: Enable automatic garbage collection optimization
+    import gc
+    gc.set_threshold(700, 10, 10)  # More aggressive GC
+    
     # Register cleanup function
     atexit.register(cleanup)
     

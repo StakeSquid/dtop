@@ -10,6 +10,8 @@ import time
 import subprocess
 import os
 from utils import safe_addstr
+import concurrent.futures
+import aiohttp
 
 def parse_filter_expression(filter_string):
     """Parse filter expression with AND/OR operators and parentheses
@@ -618,6 +620,11 @@ def show_logs(tui, stdscr, container):
         last_display_time = 0
         all_raw_logs = raw_logs.copy()  # Keep track of ALL raw logs for toggling
         
+        # ADDED: Maximum logs to keep in memory
+        MAX_LOG_LINES = 50000  # Adjust based on your memory constraints
+        LOG_CLEANUP_INTERVAL = 100  # Clean up every 100 new lines
+        new_lines_since_cleanup = 0
+        
         # Track logical lines for accurate navigation
         last_logical_lines_count = len(logs)
         
@@ -711,6 +718,41 @@ def show_logs(tui, stdscr, container):
                             
                             # Add to original logs
                             original_logs.extend(new_logs)
+                            
+                            # ADDED: Cleanup old logs if we exceed the limit
+                            new_lines_since_cleanup += len(truly_new_logs)
+                            
+                            if new_lines_since_cleanup >= LOG_CLEANUP_INTERVAL:
+                                new_lines_since_cleanup = 0
+                                
+                                # Trim all_raw_logs if too large
+                                if len(all_raw_logs) > MAX_LOG_LINES:
+                                    excess = len(all_raw_logs) - MAX_LOG_LINES
+                                    all_raw_logs = all_raw_logs[excess:]
+                                    
+                                # Trim original_logs if too large
+                                if len(original_logs) > MAX_LOG_LINES:
+                                    excess = len(original_logs) - MAX_LOG_LINES
+                                    original_logs = original_logs[excess:]
+                                    
+                                    # If filtering is active, reapply filter to trimmed logs
+                                    if filtering_active:
+                                        filtered_logs, filtered_line_map = filter_logs(
+                                            original_logs, filter_string, case_sensitive
+                                        )
+                                        logs = filtered_logs
+                                    else:
+                                        logs = original_logs
+                                        
+                                    # Rebuild pad with trimmed logs
+                                    pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
+                                    pad = pad_info['pad']
+                                    line_positions = pad_info['line_positions']
+                                    actual_lines_count = pad_info['actual_lines']
+                                    
+                                    # Adjust position if needed
+                                    if pos > actual_lines_count - (h-4):
+                                        pos = max(0, actual_lines_count - (h-4))
                             
                             # If filtering is active, apply filter to new logs
                             if filtering_active:

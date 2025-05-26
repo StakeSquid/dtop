@@ -81,6 +81,10 @@ class DockerTUI:
         self.filter_mode = False
         self.filtered_containers = []
         
+        # ADDED: Limit container history
+        self.container_history_limit = 100
+        self.container_fetch_count = 0
+        
         # Color pairs for speed indicators
         self.init_speed_colors()
     
@@ -102,6 +106,30 @@ class DockerTUI:
             except:
                 pass
 
+    def cleanup_stats_cache(self):
+        """Remove stats entries for containers that no longer exist"""
+        with self.stats_lock:
+            # Get current container IDs
+            current_ids = {c.id for c in self.containers}
+            
+            # Find stale entries
+            stale_ids = [cid for cid in self.stats_cache.keys() if cid not in current_ids]
+            
+            # Remove stale entries
+            for cid in stale_ids:
+                del self.stats_cache[cid]
+                
+            # Also limit cache size to prevent unbounded growth
+            # Keep only last 1000 entries (adjust based on your needs)
+            if len(self.stats_cache) > 1000:
+                # Remove oldest entries
+                sorted_entries = sorted(
+                    self.stats_cache.items(), 
+                    key=lambda x: x[1].get('time', 0)
+                )
+                for cid, _ in sorted_entries[:len(sorted_entries) - 1000]:
+                    del self.stats_cache[cid]
+
     def fetch_containers(self):
         """Fetch container list with throttling"""
         current_time = time.time()
@@ -112,6 +140,17 @@ class DockerTUI:
                     # Sort containers by current sort settings
                     self.containers = self.sort_containers(containers)
                     self.last_container_fetch = current_time
+                    
+                    # ADDED: Periodic full cleanup
+                    self.container_fetch_count += 1
+                    if self.container_fetch_count % 100 == 0:
+                        # Force garbage collection every 100 fetches
+                        import gc
+                        gc.collect()
+                        self.container_fetch_count = 0
+                    
+                    # ADDED: Clean up stats cache periodically
+                    self.cleanup_stats_cache()
                     
                     # Clear stats for stopped containers
                     with self.stats_lock:
@@ -790,8 +829,16 @@ class DockerTUI:
             print("\033[?1003l")
             print("\033[?1002l")
             
-            # Close executor
-            self.executor.shutdown(wait=False)
+            # IMPROVED: Shutdown executor with timeout
+            self.executor.shutdown(wait=True, timeout=5.0)
+            
+            # ADDED: Clear stats cache
+            with self.stats_lock:
+                self.stats_cache.clear()
+            
+            # ADDED: Force garbage collection
+            import gc
+            gc.collect()
             
             # Clean up stats collector
             from stats import cleanup_stats_sync

@@ -137,13 +137,21 @@ class AsyncStatsCollector:
         self.session: Optional['aiohttp.ClientSession'] = None
         self.previous_stats: Dict[str, dict] = {}
         self.previous_timestamp: Dict[str, float] = {}
+        # ADDED: Track last cleanup time
+        self.last_cleanup_time = time.time()
+        self.cleanup_interval = 300  # Clean up every 5 minutes
         
     async def __aenter__(self):
         """Create aiohttp session with Unix socket connector."""
         if not AIOHTTP_AVAILABLE:
             return self
             
-        connector = aiohttp.UnixConnector(path=DOCKER_SOCKET_PATH)
+        # ADDED: Connection limits to prevent resource exhaustion
+        connector = aiohttp.UnixConnector(
+            path=DOCKER_SOCKET_PATH,
+            limit=20,  # Limit total connections
+            limit_per_host=10  # Limit per host
+        )
         timeout = aiohttp.ClientTimeout(total=5.0)  # 5 second timeout
         self.session = aiohttp.ClientSession(
             connector=connector,
@@ -155,6 +163,26 @@ class AsyncStatsCollector:
         """Close aiohttp session."""
         if self.session:
             await self.session.close()
+            
+    async def cleanup_old_entries(self):
+        """Remove entries for containers that haven't been seen recently"""
+        current_time = time.time()
+        if current_time - self.last_cleanup_time < self.cleanup_interval:
+            return
+            
+        # Remove entries older than 10 minutes
+        cutoff_time = current_time - 600
+        
+        stale_ids = [
+            cid for cid, timestamp in self.previous_timestamp.items()
+            if timestamp < cutoff_time
+        ]
+        
+        for stale_id in stale_ids:
+            self.previous_stats.pop(stale_id, None)
+            self.previous_timestamp.pop(stale_id, None)
+            
+        self.last_cleanup_time = current_time
             
     async def get_running_containers(self) -> List[dict]:
         """Get list of running containers from Docker API."""
@@ -191,6 +219,9 @@ class AsyncStatsCollector:
         
     async def collect_all_stats(self, containers: List) -> None:
         """Collect stats for all containers in parallel."""
+        # ADDED: Periodic cleanup
+        await self.cleanup_old_entries()
+        
         # Filter running containers
         running_containers = [c for c in containers if c.status == 'running']
         
