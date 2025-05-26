@@ -31,14 +31,14 @@ class DockerTUI:
         self.running = True
         self.fetch_lock = threading.Lock()
         self.last_container_fetch = 0
-        self.container_fetch_interval = 1  # seconds
+        self.container_fetch_interval = 2  # seconds - reduced frequency for high container count
         
         # Stats cache
         self.stats_lock = threading.Lock()
         self.stats_cache = defaultdict(dict)
         
         # Thread pool for parallel stats collection
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=30)
         
         # Load column configuration
         self.columns = load_config()

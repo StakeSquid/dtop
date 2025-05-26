@@ -149,8 +149,8 @@ class AsyncStatsCollector:
         # ADDED: Connection limits to prevent resource exhaustion
         connector = aiohttp.UnixConnector(
             path=DOCKER_SOCKET_PATH,
-            limit=20,  # Limit total connections
-            limit_per_host=10  # Limit per host
+            limit=150,  # Increased for high container count
+            limit_per_host=100  # Increased for high container count
         )
         timeout = aiohttp.ClientTimeout(total=5.0)  # 5 second timeout
         self.session = aiohttp.ClientSession(
