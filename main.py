@@ -11,6 +11,7 @@ A high-performance terminal UI for managing Docker containers:
 - Reliable log display with normalization and line wrapping
 - Text search in logs with highlighted results
 - Log filtering (grep-like functionality)
+- Time-based log filtering and export
 - Configuration saving
 
 Controls:
@@ -21,7 +22,9 @@ Controls:
   - N            : Toggle log normalization
   - W            : Toggle log line wrapping
   - /            : Search in logs
-  - \            : Filter logs (grep)
+  - \\            : Filter logs (grep)
+  - R            : Time range filter
+  - E            : Export logs to file
   - n/N          : Next/previous search result
   - Q            : Quit
 
