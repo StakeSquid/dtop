@@ -12,6 +12,8 @@ import os
 from utils import safe_addstr
 import concurrent.futures
 import aiohttp
+from datetime import datetime, timezone
+import json
 
 def parse_filter_expression(filter_string):
     """Parse filter expression with AND/OR operators and parentheses
@@ -474,6 +476,427 @@ def filter_logs(logs, filter_string, case_sensitive=False):
     
     return filtered_logs, line_map
 
+def show_time_filter_dialog(stdscr):
+    """Show dialog to set time range filter"""
+    h, w = stdscr.getmaxyx()
+    
+    # Create dialog window
+    dialog_width = 70
+    dialog_height = 15
+    dialog_y = (h - dialog_height) // 2
+    dialog_x = (w - dialog_width) // 2
+    
+    dialog = curses.newwin(dialog_height, dialog_width, dialog_y, dialog_x)
+    dialog.keypad(True)
+    dialog.border()
+    
+    # Draw title
+    title = " Time Range Filter "
+    safe_addstr(dialog, 0, (dialog_width - len(title)) // 2, title)
+    
+    # Show current system time
+    current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    time_info = f"Current system time: {current_time_str}"
+    safe_addstr(dialog, 2, (dialog_width - len(time_info)) // 2, time_info, curses.A_BOLD)
+    
+    # Draw instructions
+    safe_addstr(dialog, 4, 2, "Filter logs by time range:")
+    safe_addstr(dialog, 5, 2, "Format: YYYY-MM-DD HH:MM:SS (or partial like '2024-01-01')")
+    safe_addstr(dialog, 6, 2, "Leave empty for no filter")
+    safe_addstr(dialog, 7, 2, "Note: Only logs with timestamps will be shown")
+    
+    # Input fields
+    safe_addstr(dialog, 9, 2, "From time: ")
+    safe_addstr(dialog, 10, 2, "To time:   ")
+    safe_addstr(dialog, 11, 2, "(empty = until present)")
+    
+    from_input = ""
+    to_input = ""
+    current_field = 0  # 0 = from, 1 = to
+    
+    curses.curs_set(1)  # Show cursor
+    
+    while True:
+        # Clear input lines
+        safe_addstr(dialog, 9, 12, " " * (dialog_width - 14))
+        safe_addstr(dialog, 10, 12, " " * (dialog_width - 14))
+        
+        # Draw inputs
+        safe_addstr(dialog, 9, 12, from_input, curses.A_REVERSE if current_field == 0 else 0)
+        safe_addstr(dialog, 10, 12, to_input, curses.A_REVERSE if current_field == 1 else 0)
+        
+        # Position cursor
+        if current_field == 0:
+            dialog.move(9, 12 + len(from_input))
+        else:
+            dialog.move(10, 12 + len(to_input))
+        
+        dialog.refresh()
+        
+        ch = dialog.getch()
+        
+        if ch == 27:  # ESC - cancel
+            curses.curs_set(0)
+            return None
+        elif ch == 9:  # Tab - switch field
+            current_field = 1 - current_field
+        elif ch == curses.KEY_BACKSPACE or ch == 127 or ch == 8:
+            if current_field == 0 and from_input:
+                from_input = from_input[:-1]
+            elif current_field == 1 and to_input:
+                to_input = to_input[:-1]
+        elif ch == 10:  # Enter - confirm
+            curses.curs_set(0)
+            return {'from': from_input.strip(), 'to': to_input.strip()}
+        elif ch < 256 and ch >= 32:  # Printable character
+            if current_field == 0 and len(from_input) < 19:
+                from_input += chr(ch)
+            elif current_field == 1 and len(to_input) < 19:
+                to_input += chr(ch)
+
+def show_export_dialog(stdscr):
+    """Show dialog to configure log export"""
+    h, w = stdscr.getmaxyx()
+    
+    # Create dialog window
+    dialog_width = 60
+    dialog_height = 10
+    dialog_y = (h - dialog_height) // 2
+    dialog_x = (w - dialog_width) // 2
+    
+    dialog = curses.newwin(dialog_height, dialog_width, dialog_y, dialog_x)
+    dialog.keypad(True)
+    dialog.border()
+    
+    # Draw title
+    title = " Export Logs "
+    safe_addstr(dialog, 0, (dialog_width - len(title)) // 2, title)
+    
+    # Draw instructions
+    safe_addstr(dialog, 2, 2, "Export location:")
+    safe_addstr(dialog, 3, 2, "1. Current directory")
+    safe_addstr(dialog, 4, 2, "2. Custom path")
+    safe_addstr(dialog, 6, 2, "Enter choice (1/2) or ESC to cancel:")
+    
+    dialog.refresh()
+    
+    while True:
+        ch = dialog.getch()
+        
+        if ch == 27:  # ESC - cancel
+            return None
+        elif ch == ord('1'):
+            return {'type': 'current_dir'}
+        elif ch == ord('2'):
+            # Get custom path
+            safe_addstr(dialog, 7, 2, "Enter path: ")
+            dialog.refresh()
+            
+            path_input = ""
+            curses.curs_set(1)
+            
+            while True:
+                # Clear and redraw input
+                safe_addstr(dialog, 7, 14, " " * (dialog_width - 16))
+                safe_addstr(dialog, 7, 14, path_input)
+                dialog.move(7, 14 + len(path_input))
+                dialog.refresh()
+                
+                ch2 = dialog.getch()
+                
+                if ch2 == 27:  # ESC - cancel
+                    curses.curs_set(0)
+                    return None
+                elif ch2 == curses.KEY_BACKSPACE or ch2 == 127 or ch2 == 8:
+                    if path_input:
+                        path_input = path_input[:-1]
+                elif ch2 == 10:  # Enter - confirm
+                    curses.curs_set(0)
+                    return {'type': 'custom_path', 'path': path_input.strip()}
+                elif ch2 < 256 and ch2 >= 32:  # Printable character
+                    if len(path_input) < 50:
+                        path_input += chr(ch2)
+
+def parse_time_string(time_str):
+    """Parse time string in various formats"""
+    if not time_str:
+        return None
+    
+    # Try different time formats
+    formats = [
+        '%Y-%m-%dT%H:%M:%S',
+        '%Y-%m-%dT%H:%M',
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%d %H:%M', 
+        '%Y-%m-%d %H',
+        '%Y-%m-%d',
+        '%m-%d %H:%M:%S',
+        '%m-%d %H:%M',
+        '%m-%d',
+        '%H:%M:%S',
+        '%H:%M'
+    ]
+    
+    current_year = datetime.now().year
+    current_month = datetime.now().month
+    current_day = datetime.now().day
+    
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(time_str, fmt)
+            
+            # Fill in missing parts with current values
+            if '%Y' not in fmt:
+                parsed = parsed.replace(year=current_year)
+            if '%m' not in fmt:
+                parsed = parsed.replace(month=current_month)
+            if '%d' not in fmt:
+                parsed = parsed.replace(day=current_day)
+            
+            return parsed
+        except ValueError:
+            continue
+    
+    return None
+
+def convert_to_docker_time_format(time_str, reference_logs=None):
+    """Convert user time input to datetime object for Docker API"""
+    if not time_str:
+        return None
+    
+    # Parse the time string
+    parsed_time = parse_time_string(time_str)
+    if not parsed_time:
+        return None
+    
+    # If this is a time-only input (no date components), use current date
+    if ':' in time_str and not any(c in time_str for c in ['-', '/', 'T']):
+        current_date = datetime.now().date()
+        parsed_time = datetime.combine(current_date, parsed_time.time())
+        
+
+    
+    # Return the datetime object directly - Docker API expects this, not a string!
+    return parsed_time
+
+def fetch_logs_with_time_filter(container, since=None, until=None, tail=None):
+    """Fetch logs using Docker's native time filtering"""
+    # Maximum number of logs to prevent memory issues and crashes
+    MAX_LOGS_SAFE = 20000
+    
+    try:
+        # Prepare Docker logs parameters
+        log_params = {}
+        
+        if since:
+            log_params['since'] = since
+        if until:
+            log_params['until'] = until
+        if tail and tail > 0:
+            log_params['tail'] = tail
+        
+
+        
+        # Fetch logs with Docker's native filtering
+        raw_logs = container.logs(**log_params).decode(errors='ignore').splitlines()
+        
+        # Check if we got too many logs and truncate for safety
+        if len(raw_logs) > MAX_LOGS_SAFE:
+            raw_logs = raw_logs[-MAX_LOGS_SAFE:]  # Keep the most recent logs
+        
+        return raw_logs
+    except Exception as e:
+        # If Docker filtering fails, fallback to regular logs
+        if tail and tail > 0:
+            return container.logs(tail=tail).decode(errors='ignore').splitlines()
+        else:
+            # For fallback, also apply safe limit
+            fallback_logs = container.logs().decode(errors='ignore').splitlines()
+            if len(fallback_logs) > MAX_LOGS_SAFE:
+                fallback_logs = fallback_logs[-MAX_LOGS_SAFE:]
+            return fallback_logs
+
+def filter_logs_by_time(logs, from_time=None, to_time=None, debug=False):
+    """Filter logs by time range"""
+    if not from_time and not to_time:
+        return logs, list(range(len(logs)))
+    
+    filtered_logs = []
+    line_map = []
+    
+    # Parse time bounds
+    from_dt = parse_time_string(from_time) if from_time else None
+    to_dt = parse_time_string(to_time) if to_time else None
+    
+
+    
+    # Collect log timestamps to determine the appropriate date context
+    log_dates = []
+    if from_dt or to_dt:
+        for line in logs:
+            log_time = extract_log_timestamp(line)
+            if log_time:
+                log_dates.append(log_time.date())
+    
+    # Determine target date for time-only filters
+    if log_dates:
+        # Use the most recent date from logs
+        target_date = max(log_dates)
+    else:
+        # Fallback to current date
+        target_date = datetime.now().date()
+    
+
+    
+    # Adjust time bounds based on what information they contain
+    if from_dt:
+        # If only time was specified (no date), use target date
+        if from_time and ':' in from_time and not any(c in from_time for c in ['-', '/']):
+            from_dt = datetime.combine(target_date, from_dt.time())
+        # If partial date (no year), use the year from logs
+        elif '%Y' not in (from_time or '') and log_dates:
+            from_dt = from_dt.replace(year=target_date.year)
+    
+    if to_dt:
+        # If only time was specified (no date), use target date
+        if to_time and ':' in to_time and not any(c in to_time for c in ['-', '/']):
+            to_dt = datetime.combine(target_date, to_dt.time())
+        # If partial date (no year), use the year from logs
+        elif '%Y' not in (to_time or '') and log_dates:
+            to_dt = to_dt.replace(year=target_date.year)
+    
+
+    
+    logs_without_timestamps = 0
+    logs_before_range = 0
+    logs_after_range = 0
+    logs_in_range = 0
+    
+    for i, line in enumerate(logs):
+        # Try to extract timestamp from log line
+        log_time = extract_log_timestamp(line)
+        
+
+        
+        # Only include logs that have timestamps and are within range
+        if log_time:
+            # Check if log time is within range
+            if from_dt and log_time < from_dt:
+                logs_before_range += 1
+                continue
+            if to_dt and log_time > to_dt:
+                logs_after_range += 1
+                continue
+            
+            # Log is within time range
+            filtered_logs.append(line)
+            line_map.append(i)
+            logs_in_range += 1
+        else:
+            logs_without_timestamps += 1
+        # Note: logs without timestamps are excluded when time filtering is active
+    
+
+    
+    return filtered_logs, line_map
+
+def extract_log_timestamp(log_line):
+    """Extract timestamp from a log line"""
+    # Common timestamp patterns in logs (in order of specificity)
+    patterns = [
+        # Docker format: 2024-01-01T12:00:00.000000000Z
+        r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6,9}Z?)',
+        # ISO 8601 format: 2024-01-01T12:00:00.000Z
+        r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,3}Z?)',
+        # ISO 8601 without microseconds: 2024-01-01T12:00:00Z
+        r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?)',
+        # Standard format: 2024-01-01 12:00:00
+        r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})',
+        # RFC3339 with timezone: 2024-01-01T12:00:00+00:00
+        r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})',
+        # Syslog format: Jan 01 12:00:00
+        r'([A-Za-z]{3} +\d{1,2} \d{2}:\d{2}:\d{2})',
+        # Time only with microseconds: 12:00:00.000
+        r'(\d{2}:\d{2}:\d{2}\.\d{1,6})',
+        # Time only: 12:00:00
+        r'(\d{2}:\d{2}:\d{2})'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, log_line)
+        if match:
+            timestamp_str = match.group(1)
+            
+            # Try to parse the timestamp
+            formats = [
+                '%Y-%m-%dT%H:%M:%S.%fZ',
+                '%Y-%m-%dT%H:%M:%S.%f',
+                '%Y-%m-%dT%H:%M:%SZ',
+                '%Y-%m-%dT%H:%M:%S',
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%dT%H:%M:%S%z',  # RFC3339 with timezone
+                '%b %d %H:%M:%S',
+                '%H:%M:%S.%f',
+                '%H:%M:%S'
+            ]
+            
+            for fmt in formats:
+                try:
+                    parsed = datetime.strptime(timestamp_str, fmt)
+                    
+                    # For formats without year, use current year
+                    if '%Y' not in fmt:
+                        parsed = parsed.replace(year=datetime.now().year)
+                    
+                    return parsed
+                except ValueError:
+                    continue
+    
+    return None
+
+def export_logs_to_file(logs, container_name, export_config, filter_info=None):
+    """Export logs to file with metadata"""
+    try:
+        # Determine export path
+        if export_config['type'] == 'current_dir':
+            export_dir = os.getcwd()
+        else:
+            export_dir = export_config['path']
+            if not os.path.exists(export_dir):
+                os.makedirs(export_dir, exist_ok=True)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{container_name}_logs_{timestamp}.txt"
+        filepath = os.path.join(export_dir, filename)
+        
+        # Write logs with metadata
+        with open(filepath, 'w', encoding='utf-8') as f:
+            # Write header with export info
+            f.write(f"# Docker Container Logs Export\n")
+            f.write(f"# Container: {container_name}\n")
+            f.write(f"# Export Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"# Total Lines: {len(logs)}\n")
+            
+            if filter_info:
+                f.write(f"# Filters Applied:\n")
+                if filter_info.get('text_filter'):
+                    f.write(f"#   Text Filter: {filter_info['text_filter']}\n")
+                if filter_info.get('time_filter'):
+                    f.write(f"#   Time Filter: {filter_info['time_filter']}\n")
+                if filter_info.get('search_term'):
+                    f.write(f"#   Search Term: {filter_info['search_term']}\n")
+            
+            f.write(f"# " + "="*50 + "\n\n")
+            
+            # Write the actual logs
+            for line in logs:
+                f.write(line + '\n')
+        
+        return filepath
+    except Exception as e:
+        return None
+
 def show_tail_dialog(stdscr, current_tail):
     """Show dialog to change the tail (number of lines) value"""
     h, w = stdscr.getmaxyx()
@@ -603,6 +1026,13 @@ def show_logs(tui, stdscr, container):
         original_logs = logs.copy()  # Keep a copy of original logs
         case_sensitive = False
         
+        # Time filter state
+        time_filter_active = False
+        time_filter_from = None
+        time_filter_to = None
+        time_filtered_logs = []
+        time_filtered_line_map = []
+        
         # Flags to control loop flow
         skip_normal_input = False
         just_processed_search = False
@@ -621,7 +1051,7 @@ def show_logs(tui, stdscr, container):
         all_raw_logs = raw_logs.copy()  # Keep track of ALL raw logs for toggling
         
         # ADDED: Maximum logs to keep in memory
-        MAX_LOG_LINES = 50000  # Adjust based on your memory constraints
+        MAX_LOG_LINES = 25000  # Reduced to prevent memory issues and crashes
         LOG_CLEANUP_INTERVAL = 100  # Clean up every 100 new lines
         new_lines_since_cleanup = 0
         
@@ -649,15 +1079,15 @@ def show_logs(tui, stdscr, container):
         stdscr.attroff(curses.color_pair(5))
         
         # Draw footer with help
-        if filtering_active:
+        if filtering_active or time_filter_active:
             if tui.wrap_log_lines:
-                footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                footer_text = " ↑/↓:Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
             else:
-                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
         elif tui.wrap_log_lines:
-            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
+            footer_text = " ↑/↓:Scroll | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | R:Time | E:Export | /:Search | \\:Filter | ESC:Back "
         else:
-            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
+            footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | R:Time | E:Export | /:Search | \\:Filter | ESC:Back "
         
         stdscr.attron(curses.color_pair(6))
         safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -674,8 +1104,8 @@ def show_logs(tui, stdscr, container):
             
             current_time = time.time()
             
-            # Update logs in follow mode
-            if follow_mode and current_time - last_log_time >= log_update_interval:
+            # Update logs in follow mode (but not when time filtering is active)
+            if follow_mode and not time_filter_active and current_time - last_log_time >= log_update_interval:
                 try:
                     # Use tail to get only new logs since we last checked
                     # This approach avoids duplicates by only getting logs we haven't seen
@@ -735,11 +1165,19 @@ def show_logs(tui, stdscr, container):
                                     excess = len(original_logs) - MAX_LOG_LINES
                                     original_logs = original_logs[excess:]
                                     
-                                    # If filtering is active, reapply filter to trimmed logs
-                                    if filtering_active:
-                                        filtered_logs, filtered_line_map = filter_logs(
-                                            original_logs, filter_string, case_sensitive
-                                        )
+                                    # If filtering is active, reapply filters to trimmed logs
+                                    if filtering_active or time_filter_active:
+                                        # Start with original logs
+                                        filtered_logs = original_logs
+                                        
+                                        # Apply time filter first if active
+                                        if time_filter_active:
+                                            filtered_logs, _ = filter_logs_by_time(filtered_logs, time_filter_from, time_filter_to)
+                                        
+                                        # Then apply text filter if active
+                                        if filtering_active:
+                                            filtered_logs, filtered_line_map = filter_logs(filtered_logs, filter_string, case_sensitive)
+                                        
                                         logs = filtered_logs
                                     else:
                                         logs = original_logs
@@ -754,10 +1192,19 @@ def show_logs(tui, stdscr, container):
                                     if pos > actual_lines_count - (h-4):
                                         pos = max(0, actual_lines_count - (h-4))
                             
-                            # If filtering is active, apply filter to new logs
-                            if filtering_active:
-                                # Apply filter to all logs (original + new)
-                                filtered_logs, filtered_line_map = filter_logs(original_logs, filter_string, case_sensitive)
+                            # If filtering is active, apply filters to new logs
+                            if filtering_active or time_filter_active:
+                                # Start with original logs
+                                filtered_logs = original_logs
+                                
+                                # Apply time filter first if active
+                                if time_filter_active:
+                                    filtered_logs, _ = filter_logs_by_time(filtered_logs, time_filter_from, time_filter_to)
+                                
+                                # Then apply text filter if active
+                                if filtering_active:
+                                    filtered_logs, filtered_line_map = filter_logs(filtered_logs, filter_string, case_sensitive)
+                                
                                 logs = filtered_logs
                                 
                                 # Rebuild pad with filtered logs
@@ -913,15 +1360,15 @@ def show_logs(tui, stdscr, container):
                             stdscr.attroff(curses.color_pair(5))
                             
                             # Restore normal footer
-                            if filtering_active:
+                            if filtering_active or time_filter_active:
                                 if tui.wrap_log_lines:
-                                    footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                    footer_text = " ↑/↓:Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
                                 else:
-                                    footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                    footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
                             elif tui.wrap_log_lines:
-                                footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
+                                footer_text = " ↑/↓:Scroll | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | R:Time | E:Export | /:Search | \\:Filter | ESC:Back "
                             else:
-                                footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
+                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | R:Time | E:Export | /:Search | \\:Filter | ESC:Back "
                             
                             stdscr.attron(curses.color_pair(6))
                             safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -1143,11 +1590,11 @@ def show_logs(tui, stdscr, container):
                     stdscr.attroff(curses.color_pair(5))
                     
                     # Update footer if filtering is active
-                    if filtering_active:
+                    if filtering_active or time_filter_active:
                         if tui.wrap_log_lines:
-                            footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                            footer_text = " ↑/↓:Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
                         else:
-                            footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                            footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
                         
                         stdscr.attron(curses.color_pair(6))
                         safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -1321,11 +1768,11 @@ def show_logs(tui, stdscr, container):
                         stdscr.attroff(curses.color_pair(5))
                         
                         # Update footer based on filter state
-                        if filtering_active:
+                        if filtering_active or time_filter_active:
                             if tui.wrap_log_lines:
-                                footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                footer_text = " ↑/↓:Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
                             else:
-                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
                             
                             stdscr.attron(curses.color_pair(6))
                             safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -1354,9 +1801,19 @@ def show_logs(tui, stdscr, container):
                             logs = normalize_container_logs(tui.normalize_logs, tui.normalize_logs_script, raw_logs) if tui.normalize_logs else raw_logs
                             original_logs = logs.copy()
                             
-                            # Apply filter if active
-                            if filtering_active:
-                                filtered_logs, filtered_line_map = filter_logs(original_logs, filter_string, case_sensitive)
+                            # Apply filters if active
+                            if filtering_active or time_filter_active:
+                                # Start with original logs
+                                filtered_logs = original_logs
+                                
+                                # Apply time filter first if active
+                                if time_filter_active:
+                                    filtered_logs, _ = filter_logs_by_time(filtered_logs, time_filter_from, time_filter_to)
+                                
+                                # Then apply text filter if active
+                                if filtering_active:
+                                    filtered_logs, filtered_line_map = filter_logs(filtered_logs, filter_string, case_sensitive)
+                                
                                 logs = filtered_logs
                             
                             # Rebuild pad
@@ -1386,6 +1843,178 @@ def show_logs(tui, stdscr, container):
                             # Force redraw
                             stdscr.clear()
                             last_display_time = 0
+                    elif ch in (ord('r'), ord('R')):  # Time range filter
+                        time_filter_config = show_time_filter_dialog(stdscr)
+                        if time_filter_config:
+                            time_filter_from = time_filter_config['from']
+                            time_filter_to = time_filter_config['to']
+                            
+                            if time_filter_from or time_filter_to:
+                                # Show loading message
+                                stdscr.clear()
+                                safe_addstr(stdscr, h//2, (w-30)//2, "Applying time filter, please wait...", curses.A_BOLD)
+                                stdscr.refresh()
+                                
+                                # Convert user input to Docker time format
+                                docker_since = convert_to_docker_time_format(time_filter_from)
+                                docker_until = convert_to_docker_time_format(time_filter_to)
+                                
+
+                                
+                                # Use Docker's native time filtering
+                                try:
+                                    # IMPORTANT: Ignore tail when time filtering - fetch ALL logs in time range
+                                    # Note: fetch_logs_with_time_filter has built-in safety limits to prevent crashes
+                                    raw_logs = fetch_logs_with_time_filter(
+                                        container, 
+                                        since=docker_since, 
+                                        until=docker_until,
+                                        tail=None  # NO TAIL LIMIT when time filtering (but function applies safety limits)
+                                    )
+                                    
+                                    # Store raw logs for reference
+                                    all_raw_logs = raw_logs.copy()
+                                    
+                                    # Process logs through normalize_logs.py if needed
+                                    logs = normalize_container_logs(tui.normalize_logs, tui.normalize_logs_script, raw_logs) if tui.normalize_logs else raw_logs
+                                    original_logs = logs.copy()  # These are now the time-filtered logs
+                                    time_filter_active = True
+                                    
+                                    # Show warning if logs were truncated for safety
+                                    if len(raw_logs) == 20000:  # This indicates truncation occurred
+                                        truncation_msg = "Warning: Large log set truncated to 20,000 most recent entries for performance"
+                                        safe_addstr(stdscr, h//2+1, (w-len(truncation_msg))//2, truncation_msg, curses.color_pair(3))
+                                        stdscr.refresh()
+                                        time.sleep(2)
+                                    
+                                    # Apply text filtering if it was active before
+                                    if filtering_active:
+                                        filtered_logs, filtered_line_map = filter_logs(logs, filter_string, case_sensitive)
+                                        logs = filtered_logs
+                                    
+                                except Exception as e:
+                                    # Fallback to Python filtering if Docker filtering fails
+                                    time_filtered_logs, time_filtered_line_map = filter_logs_by_time(
+                                        original_logs, time_filter_from, time_filter_to
+                                    )
+                                    time_filter_active = True
+                                    
+                                    # If text filtering is also active, apply it to time-filtered logs
+                                    if filtering_active:
+                                        filtered_logs, filtered_line_map = filter_logs(
+                                            time_filtered_logs, filter_string, case_sensitive
+                                        )
+                                        logs = filtered_logs
+                                    else:
+                                        logs = time_filtered_logs
+                                
+                                # Rebuild pad
+                                pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
+                                pad = pad_info['pad']
+                                line_positions = pad_info['line_positions']
+                                actual_lines_count = pad_info['actual_lines']
+                                
+                                # Update line count
+                                last_logical_lines_count = len(logs)
+                                
+                                # Go to start of filtered logs
+                                pos = 0
+                                follow_mode = False  # Disable follow mode when time filtering
+                                
+                                # Show filtering results temporarily
+                                if filtering_active:
+                                    filter_info = f"Time filter: {len(original_logs)} logs fetched, {len(logs)} after text filter"
+                                else:
+                                    filter_info = f"Time filter applied: {len(logs)} logs fetched"
+                                stdscr.clear()
+                                safe_addstr(stdscr, h//2, (w-len(filter_info))//2, filter_info, curses.A_BOLD)
+                                stdscr.refresh()
+                                time.sleep(1.5)  # Show for 1.5 seconds
+                                
+                                # Force redraw
+                                stdscr.clear()
+                                last_display_time = 0
+                            else:
+                                # Clear time filter - need to reload full logs
+                                time_filter_active = False
+                                time_filter_from = None
+                                time_filter_to = None
+                                
+                                # Show loading message
+                                stdscr.clear()
+                                safe_addstr(stdscr, h//2, (w-25)//2, "Reloading full logs...", curses.A_BOLD)
+                                stdscr.refresh()
+                                
+                                # Reload all logs
+                                if tail_lines == 0:
+                                    raw_logs = container.logs().decode(errors='ignore').splitlines()
+                                else:
+                                    raw_logs = container.logs(tail=tail_lines).decode(errors='ignore').splitlines()
+                                
+                                # Process logs
+                                logs = normalize_container_logs(tui.normalize_logs, tui.normalize_logs_script, raw_logs) if tui.normalize_logs else raw_logs
+                                original_logs = logs.copy()
+                                
+                                # Apply text filtering if active
+                                if filtering_active:
+                                    filtered_logs, filtered_line_map = filter_logs(
+                                        original_logs, filter_string, case_sensitive
+                                    )
+                                    logs = filtered_logs
+                                
+                                # Rebuild pad
+                                pad_info = rebuild_log_pad(logs, w, h, tui.wrap_log_lines)
+                                pad = pad_info['pad']
+                                line_positions = pad_info['line_positions']
+                                actual_lines_count = pad_info['actual_lines']
+                                
+                                last_logical_lines_count = len(logs)
+                                stdscr.clear()
+                                last_display_time = 0
+                    elif ch in (ord('e'), ord('E')):  # Export logs
+                        export_config = show_export_dialog(stdscr)
+                        if export_config:
+                            # Prepare filter info for export metadata
+                            filter_info = {}
+                            if filtering_active:
+                                filter_info['text_filter'] = filter_string
+                            if time_filter_active:
+                                time_range = ""
+                                if time_filter_from:
+                                    time_range += f"from {time_filter_from}"
+                                if time_filter_to:
+                                    if time_range:
+                                        time_range += f" to {time_filter_to}"
+                                    else:
+                                        time_range = f"until {time_filter_to}"
+                                if not time_range:
+                                    time_range = "all time"
+                                filter_info['time_filter'] = time_range
+                            if search_string:
+                                filter_info['search_term'] = search_string
+                            
+                            # Export current filtered logs
+                            filepath = export_logs_to_file(
+                                logs, container.name, export_config, 
+                                filter_info if filter_info else None
+                            )
+                            
+                            if filepath:
+                                # Show success message
+                                success_msg = f"Logs exported to: {filepath}"
+                                safe_addstr(stdscr, h-2, (w-len(success_msg))//2, success_msg, curses.A_BOLD)
+                                stdscr.refresh()
+                                time.sleep(2)
+                            else:
+                                # Show error message
+                                error_msg = "Export failed!"
+                                safe_addstr(stdscr, h-2, (w-len(error_msg))//2, error_msg, curses.color_pair(4))
+                                stdscr.refresh()
+                                time.sleep(2)
+                            
+                            # Clear message
+                            safe_addstr(stdscr, h-2, 0, " " * w)
+                            stdscr.refresh()
                     elif ch in (ord('n'), ord('N')):  # Toggle normalization or next/prev search
                         if ch == ord('n') and search_string and search_matches:
                             # Use 'n' for next search match
@@ -1410,9 +2039,19 @@ def show_logs(tui, stdscr, container):
                                 normalized_original = normalize_container_logs(tui.normalize_logs, tui.normalize_logs_script, all_raw_logs)
                                 original_logs = normalized_original
                                 
-                                # If filtering is active, apply filter to normalized logs
-                                if filtering_active:
-                                    filtered_logs, filtered_line_map = filter_logs(original_logs, filter_string, case_sensitive)
+                                # If filtering is active, apply filters to normalized logs
+                                if filtering_active or time_filter_active:
+                                    # Start with original logs
+                                    filtered_logs = original_logs
+                                    
+                                    # Apply time filter first if active
+                                    if time_filter_active:
+                                        filtered_logs, _ = filter_logs_by_time(filtered_logs, time_filter_from, time_filter_to)
+                                    
+                                    # Then apply text filter if active
+                                    if filtering_active:
+                                        filtered_logs, filtered_line_map = filter_logs(filtered_logs, filter_string, case_sensitive)
+                                    
                                     logs = filtered_logs
                                 else:
                                     logs = original_logs
@@ -1420,9 +2059,19 @@ def show_logs(tui, stdscr, container):
                                 # Use raw logs
                                 original_logs = all_raw_logs.copy()
                                 
-                                # If filtering is active, apply filter to raw logs
-                                if filtering_active:
-                                    filtered_logs, filtered_line_map = filter_logs(original_logs, filter_string, case_sensitive)
+                                # If filtering is active, apply filters to raw logs
+                                if filtering_active or time_filter_active:
+                                    # Start with original logs
+                                    filtered_logs = original_logs
+                                    
+                                    # Apply time filter first if active
+                                    if time_filter_active:
+                                        filtered_logs, _ = filter_logs_by_time(filtered_logs, time_filter_from, time_filter_to)
+                                    
+                                    # Then apply text filter if active
+                                    if filtering_active:
+                                        filtered_logs, filtered_line_map = filter_logs(filtered_logs, filter_string, case_sensitive)
+                                    
                                     logs = filtered_logs
                                 else:
                                     logs = original_logs
@@ -1474,15 +2123,15 @@ def show_logs(tui, stdscr, container):
                         actual_lines_count = pad_info['actual_lines']
                         
                         # Update footer immediately to show horizontal scroll keys if unwrapped
-                        if filtering_active:
+                        if filtering_active or time_filter_active:
                             if tui.wrap_log_lines:
-                                footer_text = " ↑/↓:Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                footer_text = " ↑/↓:Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
                             else:
-                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | T:Tail | /:Search | \\:Change Filter | ESC:Clear Filter | Q:Back "
+                                footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | F:Follow | R:Time | E:Export | /:Search | \\:Filter | ESC:Clear | Q:Back "
                         elif tui.wrap_log_lines:
-                            footer_text = " ↑/↓:Scroll | PgUp/Dn:Page | F:Toggle Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
+                            footer_text = " ↑/↓:Scroll | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | R:Time | E:Export | /:Search | \\:Filter | ESC:Back "
                         else:
-                            footer_text = " ↑/↓:Scroll | ←/→:Scroll H | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | /:Search | \\:Filter | ESC:Back "
+                            footer_text = " ↑/↓:Scroll | ←/→:H-Scroll | PgUp/Dn | F:Follow | N:Normalize | W:Wrap | T:Tail | R:Time | E:Export | /:Search | \\:Filter | ESC:Back "
                         
                         stdscr.attron(curses.color_pair(6))
                         safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
@@ -1595,10 +2244,13 @@ def show_logs(tui, stdscr, container):
                         except curses.error:
                             pass
                     elif ch in (27, ord('q'), ord('Q')):  # ESC or Q to exit
-                        # If filtering is active and ESC is pressed, clear the filter first
-                        if ch == 27 and filtering_active:
+                        # If filtering is active and ESC is pressed, clear the filters first
+                        if ch == 27 and (filtering_active or time_filter_active):
                             filtering_active = False
+                            time_filter_active = False
                             filter_string = ""
+                            time_filter_from = None
+                            time_filter_to = None
                             logs = original_logs
                             
                             # Rebuild pad with all logs
@@ -1644,8 +2296,17 @@ def show_logs(tui, stdscr, container):
     except Exception as e:
         # Show error and wait for key
         stdscr.clear()
-        safe_addstr(stdscr, h//2, (w-len(str(e))-10)//2, f"Error: {e}", curses.A_BOLD)
+        error_msg = str(e)
+        if len(error_msg) > w - 20:
+            error_msg = error_msg[:w-23] + "..."
+        safe_addstr(stdscr, h//2, (w-len(error_msg)-10)//2, f"Error: {error_msg}", curses.A_BOLD)
         safe_addstr(stdscr, h//2+1, (w-25)//2, "Press any key to continue...", curses.A_DIM)
+        
+        # If the error is memory-related, show additional help
+        if "memory" in error_msg.lower() or "alloc" in error_msg.lower():
+            help_msg = "Try using time filters or reducing log count"
+            safe_addstr(stdscr, h//2+2, (w-len(help_msg))//2, help_msg, curses.A_DIM)
+        
         stdscr.refresh()
         stdscr.getch()
     
