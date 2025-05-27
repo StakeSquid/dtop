@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dtop"
+version = "1.0.0"
+description = "A high-performance terminal UI for Docker container management"
+readme = "README.md"
+license = "MIT"
+authors = [
+    {name = "StakeSquid"}
+]
+keywords = ["docker", "tui", "terminal", "containers", "monitoring"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Unix",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities"
+]
+requires-python = ">=3.8"
+dependencies = [
+    "docker>=6.0.0"
+]
+
+[project.optional-dependencies]
+full = [
+    "aiohttp>=3.8.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/StakeSquid/dtop"
+Repository = "https://github.com/StakeSquid/dtop"
+Issues = "https://github.com/StakeSquid/dtop/issues"
+
+[project.scripts]
+dtop = "dtop.main:main"
+
+[tool.setuptools.packages.find]
+include = ["dtop*"]
+
+[tool.setuptools.package-data]
+dtop = ["utils/normalize_logs.py"]

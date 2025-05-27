@@ -8,7 +8,7 @@ import curses
 import json
 import re
 import time
-from utils import safe_addstr
+from ..utils.utils import safe_addstr
 
 
 def parse_filter_expression(filter_string):

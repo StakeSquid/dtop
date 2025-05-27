@@ -39,7 +39,7 @@ import atexit
 def cleanup():
     """Cleanup function to ensure stats are properly cleaned up"""
     try:
-        from stats import cleanup_stats_sync
+        from dtop.core.stats import cleanup_stats_sync
         cleanup_stats_sync()
     except:
         pass
@@ -59,7 +59,7 @@ def main():
     
     # Now import our modules
     try:
-        from docker_tui import DockerTUI
+        from dtop import DockerTUI
         curses.wrapper(DockerTUI().draw)
     except docker.errors.DockerException as e:
         print("Error connecting to Docker daemon:", e)

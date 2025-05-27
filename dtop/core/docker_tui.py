@@ -16,11 +16,11 @@ import concurrent.futures
 from collections import defaultdict
 
 # Import from other modules
-from utils import safe_addstr, format_column, format_datetime, format_timedelta, format_bytes, get_speed_color
-from config import load_config, save_config
-from stats import schedule_stats_collection
-from stats import schedule_stats_collection_sync
-from container_actions import show_menu, execute_action
+from ..utils.utils import safe_addstr, format_column, format_datetime, format_timedelta, format_bytes, get_speed_color
+from ..utils.config import load_config, save_config
+from .stats import schedule_stats_collection
+from .stats import schedule_stats_collection_sync
+from ..actions.container_actions import show_menu, execute_action
 
 
 class DockerTUI:
@@ -62,7 +62,7 @@ class DockerTUI:
         self.h_scroll_offset = 0
         
         # Path to normalize_logs.py script
-        self.normalize_logs_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "normalize_logs.py")
+        self.normalize_logs_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils", "normalize_logs.py")
         
         # Check if normalize_logs.py exists and is executable
         if os.path.isfile(self.normalize_logs_script):
@@ -495,11 +495,11 @@ class DockerTUI:
                             pass
                     elif key in (ord('l'), ord('L')) and self.filtered_containers:
                         # Import here to avoid circular imports
-                        import log_view
+                        from ..views import log_view
                         log_view.show_logs(self, stdscr, self.filtered_containers[self.selected])
                     elif key in (ord('i'), ord('I')) and self.filtered_containers:
                         # Direct inspect shortcut using new module
-                        import inspect_view
+                        from ..views import inspect_view
                         inspect_view.show_inspect(self, stdscr, self.filtered_containers[self.selected])
                     elif key in (ord('n'), ord('N')):
                         # Toggle normalization setting globally
@@ -841,5 +841,5 @@ class DockerTUI:
             gc.collect()
             
             # Clean up stats collector
-            from stats import cleanup_stats_sync
+            from .stats import cleanup_stats_sync
             cleanup_stats_sync()

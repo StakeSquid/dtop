@@ -7,7 +7,7 @@ Handles container actions menu and operations.
 import curses
 import subprocess
 import time
-from utils import safe_addstr
+from ..utils.utils import safe_addstr
 
 def show_menu(tui, stdscr, container):
     """Show action menu for container with arrow key navigation"""
@@ -154,8 +154,8 @@ def show_menu(tui, stdscr, container):
 def execute_action(tui, stdscr, container, action_key):
     """Execute the selected container action"""
     # Import here to avoid circular imports
-    import log_view
-    import inspect_view
+    from ..views import log_view
+    from ..views import inspect_view
     
     if action_key == 'l':
         log_view.show_logs(tui, stdscr, container)
