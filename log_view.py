@@ -674,9 +674,7 @@ def convert_to_docker_time_format(time_str, reference_logs=None):
         current_date = datetime.now().date()
         parsed_time = datetime.combine(current_date, parsed_time.time())
         
-        # Debug output
-        import sys
-        print(f"[DEBUG] Time-only input '{time_str}', using current date {current_date}", file=sys.stderr)
+
     
     # Return the datetime object directly - Docker API expects this, not a string!
     return parsed_time
@@ -697,36 +695,24 @@ def fetch_logs_with_time_filter(container, since=None, until=None, tail=None):
         if tail and tail > 0:
             log_params['tail'] = tail
         
-        # Debug output to stderr (will be visible in terminal)
-        import sys
-        if since or until:
-            print(f"\n[DEBUG] Docker time filter:", file=sys.stderr)
-            print(f"  Since: {since} (type: {type(since).__name__})", file=sys.stderr)
-            print(f"  Until: {until} (type: {type(until).__name__})", file=sys.stderr)
-            print(f"  Tail: {tail}", file=sys.stderr)
+
         
         # Fetch logs with Docker's native filtering
         raw_logs = container.logs(**log_params).decode(errors='ignore').splitlines()
         
         # Check if we got too many logs and truncate for safety
         if len(raw_logs) > MAX_LOGS_SAFE:
-            print(f"  WARNING: {len(raw_logs)} logs fetched, truncating to {MAX_LOGS_SAFE} for performance", file=sys.stderr)
             raw_logs = raw_logs[-MAX_LOGS_SAFE:]  # Keep the most recent logs
-        
-        if since or until:
-            print(f"  Result: {len(raw_logs)} logs fetched\n", file=sys.stderr)
         
         return raw_logs
     except Exception as e:
         # If Docker filtering fails, fallback to regular logs
-        print(f"\n[ERROR] Docker filtering failed: {e}\n", file=sys.stderr)
         if tail and tail > 0:
             return container.logs(tail=tail).decode(errors='ignore').splitlines()
         else:
             # For fallback, also apply safe limit
             fallback_logs = container.logs().decode(errors='ignore').splitlines()
             if len(fallback_logs) > MAX_LOGS_SAFE:
-                print(f"  WARNING: Fallback returned {len(fallback_logs)} logs, truncating to {MAX_LOGS_SAFE}", file=sys.stderr)
                 fallback_logs = fallback_logs[-MAX_LOGS_SAFE:]
             return fallback_logs
 
@@ -742,9 +728,7 @@ def filter_logs_by_time(logs, from_time=None, to_time=None, debug=False):
     from_dt = parse_time_string(from_time) if from_time else None
     to_dt = parse_time_string(to_time) if to_time else None
     
-    if debug:
-        print(f"DEBUG: Filtering {len(logs)} logs from '{from_time}' to '{to_time}'")
-        print(f"DEBUG: Parsed from_dt: {from_dt}, to_dt: {to_dt}")
+
     
     # Collect log timestamps to determine the appropriate date context
     log_dates = []
@@ -762,8 +746,7 @@ def filter_logs_by_time(logs, from_time=None, to_time=None, debug=False):
         # Fallback to current date
         target_date = datetime.now().date()
     
-    if debug:
-        print(f"DEBUG: Found {len(log_dates)} log dates, target_date: {target_date}")
+
     
     # Adjust time bounds based on what information they contain
     if from_dt:
@@ -782,8 +765,7 @@ def filter_logs_by_time(logs, from_time=None, to_time=None, debug=False):
         elif '%Y' not in (to_time or '') and log_dates:
             to_dt = to_dt.replace(year=target_date.year)
     
-    if debug:
-        print(f"DEBUG: Adjusted from_dt: {from_dt}, to_dt: {to_dt}")
+
     
     logs_without_timestamps = 0
     logs_before_range = 0
@@ -794,8 +776,7 @@ def filter_logs_by_time(logs, from_time=None, to_time=None, debug=False):
         # Try to extract timestamp from log line
         log_time = extract_log_timestamp(line)
         
-        if debug and i < 5:  # Show first 5 for debugging
-            print(f"DEBUG: Log {i}: {line[:50]}... -> {log_time}")
+
         
         # Only include logs that have timestamps and are within range
         if log_time:
@@ -815,8 +796,7 @@ def filter_logs_by_time(logs, from_time=None, to_time=None, debug=False):
             logs_without_timestamps += 1
         # Note: logs without timestamps are excluded when time filtering is active
     
-    if debug:
-        print(f"DEBUG: Results - In range: {logs_in_range}, Before: {logs_before_range}, After: {logs_after_range}, No timestamp: {logs_without_timestamps}")
+
     
     return filtered_logs, line_map
 
@@ -1879,11 +1859,7 @@ def show_logs(tui, stdscr, container):
                                 docker_since = convert_to_docker_time_format(time_filter_from)
                                 docker_until = convert_to_docker_time_format(time_filter_to)
                                 
-                                # Debug output
-                                import sys
-                                print(f"\n[DEBUG] Time conversion:", file=sys.stderr)
-                                print(f"  From: '{time_filter_from}' -> {docker_since}", file=sys.stderr)
-                                print(f"  To: '{time_filter_to}' -> {docker_until}", file=sys.stderr)
+
                                 
                                 # Use Docker's native time filtering
                                 try:
