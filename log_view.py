@@ -672,37 +672,11 @@ def convert_to_docker_time_format(time_str, reference_logs=None):
     # If this is a time-only input (no date components), use current date
     if ':' in time_str and not any(c in time_str for c in ['-', '/', 'T']):
         current_date = datetime.now().date()
+        parsed_time = datetime.combine(current_date, parsed_time.time())
         
-        # Try to extract dates from reference logs to find a more appropriate date
-        if reference_logs:
-            log_dates = []
-            for log_line in reference_logs[-200:]:  # Check last 200 logs
-                log_time = extract_log_timestamp(log_line)
-                if log_time:
-                    log_dates.append(log_time.date())
-            
-            if log_dates:
-                # Use the most recent date from logs
-                target_date = max(log_dates)
-                parsed_time = datetime.combine(target_date, parsed_time.time())
-                
-                # Debug output
-                import sys
-                print(f"[DEBUG] Using date {target_date} from logs for time {time_str}", file=sys.stderr)
-            else:
-                # No valid dates in logs, use current date
-                parsed_time = datetime.combine(current_date, parsed_time.time())
-                
-                # Debug output
-                import sys
-                print(f"[DEBUG] No dates found in logs, using current date {current_date} for time {time_str}", file=sys.stderr)
-        else:
-            # No reference logs, use current date
-            parsed_time = datetime.combine(current_date, parsed_time.time())
-            
-            # Debug output
-            import sys
-            print(f"[DEBUG] No reference logs, using current date {current_date} for time {time_str}", file=sys.stderr)
+        # Debug output
+        import sys
+        print(f"[DEBUG] Time-only input '{time_str}', using current date {current_date}", file=sys.stderr)
     
     # Return the datetime object directly - Docker API expects this, not a string!
     return parsed_time
@@ -1902,8 +1876,8 @@ def show_logs(tui, stdscr, container):
                                 stdscr.refresh()
                                 
                                 # Convert user input to Docker time format
-                                docker_since = convert_to_docker_time_format(time_filter_from, original_logs)
-                                docker_until = convert_to_docker_time_format(time_filter_to, original_logs)
+                                docker_since = convert_to_docker_time_format(time_filter_from)
+                                docker_until = convert_to_docker_time_format(time_filter_to)
                                 
                                 # Debug output
                                 import sys
