@@ -1,0 +1,115 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.2)'
+        required: true
+        type: string
+      release_type:
+        description: 'Type of release'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+        - patch
+        - minor
+        - major
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Validate version format
+      run: |
+        if [[ ! "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "❌ Invalid version format. Use semantic versioning (e.g., 1.0.2)"
+          exit 1
+        fi
+        echo "✅ Version format is valid: ${{ inputs.version }}"
+        
+    - name: Check if tag exists
+      run: |
+        if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+          echo "❌ Tag v${{ inputs.version }} already exists"
+          exit 1
+        fi
+        echo "✅ Tag v${{ inputs.version }} is available"
+        
+    - name: Update version files
+      run: |
+        # Update pyproject.toml
+        sed -i "s/version = \".*\"/version = \"${{ inputs.version }}\"/" pyproject.toml
+        
+        # Update __init__.py
+        sed -i "s/__version__ = \".*\"/__version__ = \"${{ inputs.version }}\"/" dtop/__init__.py
+        
+        echo "Updated version to ${{ inputs.version }}"
+        
+    - name: Generate changelog entry
+      id: changelog
+      run: |
+        # Get commits since last tag
+        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+        if [ -n "$LAST_TAG" ]; then
+          COMMITS=$(git log ${LAST_TAG}..HEAD --oneline --no-merges)
+        else
+          COMMITS=$(git log --oneline --no-merges -n 10)
+        fi
+        
+        # Create changelog
+        CHANGELOG="## What's Changed\n\n"
+        if [ -n "$COMMITS" ]; then
+          while read -r line; do
+            if [ -n "$line" ]; then
+              CHANGELOG="${CHANGELOG}- ${line}\n"
+            fi
+          done <<< "$COMMITS"
+        else
+          CHANGELOG="${CHANGELOG}- Version bump to ${{ inputs.version }}\n"
+        fi
+        
+        CHANGELOG="${CHANGELOG}\n**Full Changelog**: https://github.com/${{ github.repository }}/compare/${LAST_TAG}...v${{ inputs.version }}"
+        
+        # Save to file for multiline output
+        echo -e "$CHANGELOG" > changelog.md
+        echo "Generated changelog for release"
+        
+    - name: Commit version changes
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add pyproject.toml dtop/__init__.py
+        git commit -m "Bump version to ${{ inputs.version }}"
+        git push
+        
+    - name: Create and push tag
+      run: |
+        git tag -a "v${{ inputs.version }}" -m "Release v${{ inputs.version }}"
+        git push origin "v${{ inputs.version }}"
+        
+    - name: Create GitHub Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v${{ inputs.version }}
+        release_name: dtop v${{ inputs.version }}
+        body_path: changelog.md
+        draft: false
+        prerelease: ${{ inputs.prerelease }}
