@@ -669,29 +669,49 @@ def convert_to_docker_time_format(time_str, reference_logs=None):
     if not parsed_time:
         return None
     
-    # If we have reference logs and this is a time-only input, use the log date
-    if reference_logs and ':' in time_str and not any(c in time_str for c in ['-', '/', 'T']):
-        # Extract dates from reference logs to find the most appropriate date
-        log_dates = []
-        for log_line in reference_logs[-200:]:  # Check last 200 logs
-            log_time = extract_log_timestamp(log_line)
-            if log_time:
-                log_dates.append(log_time.date())
+    # If this is a time-only input (no date components), use current date
+    if ':' in time_str and not any(c in time_str for c in ['-', '/', 'T']):
+        current_date = datetime.now().date()
         
-        if log_dates:
-            # Use the most recent date from logs
-            target_date = max(log_dates)
-            parsed_time = datetime.combine(target_date, parsed_time.time())
+        # Try to extract dates from reference logs to find a more appropriate date
+        if reference_logs:
+            log_dates = []
+            for log_line in reference_logs[-200:]:  # Check last 200 logs
+                log_time = extract_log_timestamp(log_line)
+                if log_time:
+                    log_dates.append(log_time.date())
+            
+            if log_dates:
+                # Use the most recent date from logs
+                target_date = max(log_dates)
+                parsed_time = datetime.combine(target_date, parsed_time.time())
+                
+                # Debug output
+                import sys
+                print(f"[DEBUG] Using date {target_date} from logs for time {time_str}", file=sys.stderr)
+            else:
+                # No valid dates in logs, use current date
+                parsed_time = datetime.combine(current_date, parsed_time.time())
+                
+                # Debug output
+                import sys
+                print(f"[DEBUG] No dates found in logs, using current date {current_date} for time {time_str}", file=sys.stderr)
+        else:
+            # No reference logs, use current date
+            parsed_time = datetime.combine(current_date, parsed_time.time())
             
             # Debug output
             import sys
-            print(f"[DEBUG] Using date {target_date} from logs for time {time_str}", file=sys.stderr)
+            print(f"[DEBUG] No reference logs, using current date {current_date} for time {time_str}", file=sys.stderr)
     
     # Return the datetime object directly - Docker API expects this, not a string!
     return parsed_time
 
 def fetch_logs_with_time_filter(container, since=None, until=None, tail=None):
     """Fetch logs using Docker's native time filtering"""
+    # Maximum number of logs to prevent memory issues and crashes
+    MAX_LOGS_SAFE = 20000
+    
     try:
         # Prepare Docker logs parameters
         log_params = {}
@@ -714,6 +734,11 @@ def fetch_logs_with_time_filter(container, since=None, until=None, tail=None):
         # Fetch logs with Docker's native filtering
         raw_logs = container.logs(**log_params).decode(errors='ignore').splitlines()
         
+        # Check if we got too many logs and truncate for safety
+        if len(raw_logs) > MAX_LOGS_SAFE:
+            print(f"  WARNING: {len(raw_logs)} logs fetched, truncating to {MAX_LOGS_SAFE} for performance", file=sys.stderr)
+            raw_logs = raw_logs[-MAX_LOGS_SAFE:]  # Keep the most recent logs
+        
         if since or until:
             print(f"  Result: {len(raw_logs)} logs fetched\n", file=sys.stderr)
         
@@ -724,7 +749,12 @@ def fetch_logs_with_time_filter(container, since=None, until=None, tail=None):
         if tail and tail > 0:
             return container.logs(tail=tail).decode(errors='ignore').splitlines()
         else:
-            return container.logs().decode(errors='ignore').splitlines()
+            # For fallback, also apply safe limit
+            fallback_logs = container.logs().decode(errors='ignore').splitlines()
+            if len(fallback_logs) > MAX_LOGS_SAFE:
+                print(f"  WARNING: Fallback returned {len(fallback_logs)} logs, truncating to {MAX_LOGS_SAFE}", file=sys.stderr)
+                fallback_logs = fallback_logs[-MAX_LOGS_SAFE:]
+            return fallback_logs
 
 def filter_logs_by_time(logs, from_time=None, to_time=None, debug=False):
     """Filter logs by time range"""
@@ -1067,7 +1097,7 @@ def show_logs(tui, stdscr, container):
         all_raw_logs = raw_logs.copy()  # Keep track of ALL raw logs for toggling
         
         # ADDED: Maximum logs to keep in memory
-        MAX_LOG_LINES = 50000  # Adjust based on your memory constraints
+        MAX_LOG_LINES = 25000  # Reduced to prevent memory issues and crashes
         LOG_CLEANUP_INTERVAL = 100  # Clean up every 100 new lines
         new_lines_since_cleanup = 0
         
@@ -1884,11 +1914,12 @@ def show_logs(tui, stdscr, container):
                                 # Use Docker's native time filtering
                                 try:
                                     # IMPORTANT: Ignore tail when time filtering - fetch ALL logs in time range
+                                    # Note: fetch_logs_with_time_filter has built-in safety limits to prevent crashes
                                     raw_logs = fetch_logs_with_time_filter(
                                         container, 
                                         since=docker_since, 
                                         until=docker_until,
-                                        tail=None  # NO TAIL LIMIT when time filtering!
+                                        tail=None  # NO TAIL LIMIT when time filtering (but function applies safety limits)
                                     )
                                     
                                     # Store raw logs for reference
@@ -1898,6 +1929,13 @@ def show_logs(tui, stdscr, container):
                                     logs = normalize_container_logs(tui.normalize_logs, tui.normalize_logs_script, raw_logs) if tui.normalize_logs else raw_logs
                                     original_logs = logs.copy()  # These are now the time-filtered logs
                                     time_filter_active = True
+                                    
+                                    # Show warning if logs were truncated for safety
+                                    if len(raw_logs) == 20000:  # This indicates truncation occurred
+                                        truncation_msg = "Warning: Large log set truncated to 20,000 most recent entries for performance"
+                                        safe_addstr(stdscr, h//2+1, (w-len(truncation_msg))//2, truncation_msg, curses.color_pair(3))
+                                        stdscr.refresh()
+                                        time.sleep(2)
                                     
                                     # Apply text filtering if it was active before
                                     if filtering_active:
@@ -2308,8 +2346,17 @@ def show_logs(tui, stdscr, container):
     except Exception as e:
         # Show error and wait for key
         stdscr.clear()
-        safe_addstr(stdscr, h//2, (w-len(str(e))-10)//2, f"Error: {e}", curses.A_BOLD)
+        error_msg = str(e)
+        if len(error_msg) > w - 20:
+            error_msg = error_msg[:w-23] + "..."
+        safe_addstr(stdscr, h//2, (w-len(error_msg)-10)//2, f"Error: {error_msg}", curses.A_BOLD)
         safe_addstr(stdscr, h//2+1, (w-25)//2, "Press any key to continue...", curses.A_DIM)
+        
+        # If the error is memory-related, show additional help
+        if "memory" in error_msg.lower() or "alloc" in error_msg.lower():
+            help_msg = "Try using time filters or reducing log count"
+            safe_addstr(stdscr, h//2+2, (w-len(help_msg))//2, help_msg, curses.A_DIM)
+        
         stdscr.refresh()
         stdscr.getch()
     
