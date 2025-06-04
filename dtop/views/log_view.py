@@ -11,7 +11,6 @@ import subprocess
 import os
 from ..utils.utils import safe_addstr
 import concurrent.futures
-import aiohttp
 from datetime import datetime, timezone
 import json
 
