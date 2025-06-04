@@ -172,7 +172,7 @@ dtop automatically saves your preferences to `~/.docker_tui.json`:
 {
   "columns": {
     "widths": [20, 15, 10, 8, 8, 12, 12, 15, 15],
-    "visible": ["NAME", "IMAGE", "STATUS", "CPU%", "MEM%", "NET I/O", "DISK I/O", "CREATED", "UPTIME"]
+    "visible": ["NAME", "IMAGE", "STATUS", "CPU%", "MEM%", "NET I/O", "DISK I/O", "CREATED AT", "UPTIME"]
   },
   "log_settings": {
     "normalize": true,
