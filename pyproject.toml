@@ -53,3 +53,8 @@ include = ["dtop*"]
 
 [tool.setuptools.package-data]
 dtop = ["utils/normalize_logs.py"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
