@@ -21,7 +21,7 @@ A high-performance terminal UI for Docker container management with real-time mo
 
 ### 📋 Advanced Log Management
 - **Smart Log Normalization**: Automatic parsing and formatting of JSON, structured logs
-- **Powerful Search**: Full-text search with regex support and result highlighting
+- **Powerful Search**: Full-text search with literal matching (no regex) and result highlighting
 - **Advanced Filtering**: Include/exclude patterns with complex boolean logic
 - **Time-based Filtering**: Filter logs by date/time ranges with export capabilities
 - **Follow Mode**: Real-time log streaming with auto-scroll
@@ -108,7 +108,7 @@ When you select a container (Enter or Click), you can:
 #### Search and Navigation
 | Key | Action |
 |-----|--------|
-| / | Search in logs (supports regex) |
+| / | Search in logs (literal search only) |
 | n/N | Next/previous search result |
 | \\ | Advanced filter mode |
 | ↑/↓, PgUp/PgDn | Scroll through logs |
