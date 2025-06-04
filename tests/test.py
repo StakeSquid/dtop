@@ -12,25 +12,25 @@ def test_imports():
     print("Testing imports...")
     
     try:
-        import utils
+        from dtop.utils import utils
         print("✓ utils module")
-        
-        import config
+
+        from dtop.utils import config
         print("✓ config module")
-        
-        import stats
+
+        from dtop.core import stats
         print("✓ stats module")
-        
-        import container_actions
+
+        from dtop.actions import container_actions
         print("✓ container_actions module")
-        
-        import log_view
+
+        from dtop.views import log_view
         print("✓ log_view module")
-        
-        import docker_tui
+
+        from dtop.core import docker_tui
         print("✓ docker_tui module")
-        
-        import main
+
+        from dtop import main
         print("✓ main module")
         
         print("\nAll modules imported successfully!")
@@ -42,14 +42,14 @@ def test_imports():
 def check_files():
     """Check if all necessary files exist"""
     required_files = [
-        "main.py",
-        "docker_tui.py",
-        "log_view.py",
-        "container_actions.py",
-        "utils.py",
-        "config.py",
-        "stats.py",
-        "normalize_logs.py",
+        "dtop/main.py",
+        "dtop/core/docker_tui.py",
+        "dtop/views/log_view.py",
+        "dtop/actions/container_actions.py",
+        "dtop/utils/utils.py",
+        "dtop/utils/config.py",
+        "dtop/core/stats.py",
+        "dtop/utils/normalize_logs.py",
     ]
     
     print("\nChecking required files...")
@@ -72,8 +72,8 @@ def check_files():
 def check_permissions():
     """Check if files have proper execution permissions"""
     executable_files = [
-        "main.py",
-        "normalize_logs.py"
+        "dtop/main.py",
+        "dtop/utils/normalize_logs.py"
     ]
     
     print("\nChecking executable permissions...")
