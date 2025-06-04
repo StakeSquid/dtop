@@ -457,7 +457,7 @@ def prev_search_match(search_matches, current_match, line_positions, wrap_log_li
 def filter_logs(logs, filter_string, case_sensitive=False):
     """Filter logs with advanced expression support"""
     if not filter_string:
-        return logs, []  # Return original logs if no filter
+        return logs, list(range(len(logs)))  # Return original logs with mapping if no filter
     
     # Parse the filter expression
     tokens = parse_filter_expression(filter_string)
