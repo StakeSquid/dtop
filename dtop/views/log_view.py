@@ -1037,9 +1037,7 @@ def show_logs(tui, stdscr, container):
         just_processed_search = False
         just_processed_filter = False
         
-        # Initial draw of screen
-        stdscr.refresh()
-        pad.refresh(pos, h_scroll, 2, 0, h-2, w-2)
+        # Initial draw is handled after header/footer are rendered
         
         # Reduce refresh rate to avoid flashing
         draw_interval = 0.3  # seconds between screen refreshes
@@ -1091,7 +1089,11 @@ def show_logs(tui, stdscr, container):
         stdscr.attron(curses.color_pair(6))
         safe_addstr(stdscr, h-1, 0, footer_text + " " * (w - len(footer_text)), curses.color_pair(6))
         stdscr.attroff(curses.color_pair(6))
-        
+
+        # Display logs initially
+        pad.refresh(pos, h_scroll, 2, 0, h-2, w-2)
+        stdscr.refresh()
+
         while running:
             # Clear the skip_normal_input flag at the start of each iteration
             if just_processed_search or just_processed_filter:
