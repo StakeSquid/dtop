@@ -313,31 +313,38 @@ class LogViewScreen(Screen):
     
     CSS = """
     #log-header {
-        height: 3;
-        padding: 0 1;
+        height: 2;
         background: $panel;
         border-bottom: solid $primary;
     }
     
     #container-name {
-        width: 30;
-        text-style: bold;
-    }
-    
-    .compact-input {
         width: 20;
+        text-style: bold;
         margin: 0 1;
     }
     
+    .search-input {
+        width: 20;
+        margin: 0;
+    }
+    
+    .filter-input {
+        width: 20;
+        margin: 0;
+    }
+    
     #status-compact {
-        width: 10;
+        width: 12;
         color: $text-muted;
+        margin: 0 1;
     }
     
     #log-stats {
-        width: 20;
+        width: 1fr;
         text-align: right;
         color: $text-muted;
+        margin-right: 1;
     }
     
     #log-content {
@@ -407,11 +414,11 @@ class LogViewScreen(Screen):
     
     def compose(self) -> ComposeResult:
         """Create the log view UI."""
-        # Compact header with container name and search
-        with Horizontal(id="log-header", classes="compact-header"):
-            yield Label(f"📦 {self.container.name[:30]}", id="container-name")
-            yield Input(placeholder="Search...", id="search-input", classes="compact-input")
-            yield Input(placeholder="Filter...", id="filter-input", classes="compact-input")
+        # Single-line compact header
+        with Horizontal(id="log-header"):
+            yield Label(f"{self.container.name[:15]}", id="container-name")
+            yield Input(placeholder="Search", id="search-input", classes="search-input")
+            yield Input(placeholder="Filter", id="filter-input", classes="filter-input")
             yield Label(f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'} F:{'ON' if self.is_following else 'OFF'}", id="status-compact")
             yield Label("", id="log-stats")
         
