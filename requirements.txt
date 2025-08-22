@@ -1,0 +1,7 @@
+# Core dependencies
+docker>=6.0.0
+textual>=0.47.0
+rich>=13.0.0
+
+# Optional dependencies for enhanced stats collection
+aiohttp>=3.8.0
