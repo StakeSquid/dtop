@@ -25,6 +25,46 @@ from rich.syntax import Syntax
 class LogViewScreen(Screen):
     """Advanced log viewer with search, filter, and normalization."""
     
+    CSS = """
+    #log-header {
+        height: 3;
+        padding: 0 1;
+        background: $panel;
+        border-bottom: solid $primary;
+    }
+    
+    #container-name {
+        width: 30;
+        text-style: bold;
+    }
+    
+    .compact-input {
+        width: 20;
+        height: 1;
+        margin: 0 1;
+    }
+    
+    #status-compact {
+        width: 10;
+        color: $text-muted;
+    }
+    
+    #log-stats {
+        width: 20;
+        text-align: right;
+        color: $text-muted;
+    }
+    
+    #log-content {
+        height: 100%;
+        border: none;
+    }
+    
+    Footer {
+        height: 1;
+    }
+    """
+    
     BINDINGS = [
         Binding("escape", "dismiss", "Back"),
         Binding("n", "toggle_normalize", "Toggle Normalize"),
@@ -68,34 +108,16 @@ class LogViewScreen(Screen):
     
     def compose(self) -> ComposeResult:
         """Create the log view UI."""
-        yield Header()
+        # Compact header with container name and search
+        with Horizontal(id="log-header", classes="compact-header"):
+            yield Label(f"📦 {self.container.name[:30]}", id="container-name")
+            yield Input(placeholder="Search...", id="search-input", classes="compact-input")
+            yield Input(placeholder="Filter...", id="filter-input", classes="compact-input")
+            yield Label(f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'}", id="status-compact")
+            yield Label("", id="log-stats")
         
-        with Vertical(id="log-main"):
-            # Title and controls
-            with Horizontal(id="log-header"):
-                yield Label(f"📦 {self.container.name}", id="container-name")
-                yield Label("", id="log-stats")
-            
-            # Search/Filter bar
-            with Horizontal(id="search-bar"):
-                yield Label("Search:")
-                yield Input(placeholder="Search in logs...", id="search-input")
-                yield Label("Filter:")
-                yield Input(placeholder="Filter logs...", id="filter-input")
-                yield Button("Clear", id="clear-filters", variant="warning")
-            
-            # Status bar
-            with Horizontal(id="status-bar"):
-                yield Label(f"Normalize: {'ON' if self.normalize_enabled else 'OFF'}", id="norm-status")
-                yield Label(f"Wrap: {'ON' if self.wrap_enabled else 'OFF'}", id="wrap-status")
-                yield Label(f"Timestamps: {'ON' if self.show_timestamps else 'OFF'}", id="time-status")
-                yield Label("", id="match-status")
-            
-            # Log content
-            yield ScrollableContainer(
-                RichLog(highlight=True, markup=True, wrap=self.wrap_enabled, id="log-content"),
-                id="log-scroll"
-            )
+        # Log content taking up most space
+        yield RichLog(highlight=True, markup=True, wrap=self.wrap_enabled, id="log-content")
         
         yield Footer()
     

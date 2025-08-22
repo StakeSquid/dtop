@@ -149,7 +149,7 @@ class DockerTUIApp(App):
     }
     
     #header-bar {
-        height: 3;
+        height: 1;
         background: $primary;
         color: $text;
         padding: 0 1;
@@ -157,27 +157,23 @@ class DockerTUIApp(App):
     
     #app-title {
         text-style: bold;
-        text-align: center;
     }
     
     #filter-bar {
-        height: 3;
+        height: 1;
         background: $panel;
         padding: 0 1;
         border-bottom: solid $primary;
     }
     
     #filter-input {
-        width: 30;
+        width: 20;
+        height: 1;
         margin: 0 1;
     }
     
     #stats-bar {
-        height: 1;
-        background: $panel;
-        color: $text-muted;
-        text-align: center;
-        border-bottom: solid $primary-background;
+        display: none;  /* Hide stats bar to save space */
     }
     
     #container-table {
@@ -206,15 +202,25 @@ class DockerTUIApp(App):
     }
     
     .status-indicator {
-        margin: 0 1;
+        margin: 0 0 0 1;
+        width: auto;
     }
     
-    .toggle-switch {
-        margin: 0 1;
+    .compact-switch {
+        width: 3;
+        height: 1;
+        margin: 0 1 0 0;
+    }
+    
+    #connection-status {
+        text-align: right;
+        width: 20;
+        margin: 0 0 0 1;
     }
     
     Footer {
         background: $primary;
+        height: 1;
     }
     
     Notification {
@@ -268,34 +274,17 @@ class DockerTUIApp(App):
     
     def compose(self) -> ComposeResult:
         """Create the main UI."""
-        yield Header(show_clock=True)
-        
         with Vertical(id="main-container"):
-            # Custom header bar
-            with Horizontal(id="header-bar"):
-                yield Label("🐳 Docker TUI", id="app-title")
+            # Compact filter bar with controls
+            with Horizontal(id="filter-bar"):
+                yield Input(placeholder="Filter...", id="filter-input")
+                yield Label("All", classes="status-indicator")
+                yield Switch(value=self.show_all, id="show-all-switch", classes="compact-switch")
+                yield Label("Auto", classes="status-indicator")
+                yield Switch(value=self.auto_refresh, id="auto-refresh-switch", classes="compact-switch")
                 yield Label("", id="connection-status")
             
-            # Filter and controls bar
-            with Horizontal(id="filter-bar"):
-                yield Label("Filter:")
-                yield Input(
-                    placeholder="Type to filter...",
-                    id="filter-input"
-                )
-                yield Label("All:", classes="status-indicator")
-                yield Switch(value=self.show_all, id="show-all-switch")
-                yield Label("Auto:", classes="status-indicator")
-                yield Switch(value=self.auto_refresh, id="auto-refresh-switch")
-                yield Label("Norm:", classes="status-indicator")
-                yield Switch(value=self.normalize_logs, id="normalize-switch")
-                yield Label("Wrap:", classes="status-indicator")
-                yield Switch(value=self.wrap_lines, id="wrap-switch")
-            
-            # Stats bar
-            yield Static("Initializing...", id="stats-bar")
-            
-            # Container table
+            # Container table taking up most space
             table = DataTable(id="container-table", cursor_type="row", zebra_stripes=True)
             yield table
         
@@ -376,9 +365,6 @@ class DockerTUIApp(App):
             
             # Update table display
             await self.update_table()
-            
-            # Update stats bar
-            await self.update_stats_bar()
             
             # Schedule stats collection for running containers
             running = [c for c in self.containers if c.status == 'running']

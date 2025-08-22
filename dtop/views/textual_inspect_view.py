@@ -24,6 +24,64 @@ from rich.json import JSON
 class InspectViewScreen(Screen):
     """Container inspection viewer with tree navigation and search."""
     
+    CSS = """
+    #inspect-header {
+        height: 2;
+        padding: 0 1;
+        background: $panel;
+        border-bottom: solid $primary;
+    }
+    
+    #container-title {
+        width: 40;
+        text-style: bold;
+    }
+    
+    #search-input {
+        width: 25;
+        height: 1;
+        margin: 0 1;
+    }
+    
+    #match-status {
+        width: 15;
+        color: $text-muted;
+    }
+    
+    #view-mode {
+        width: 10;
+        text-align: right;
+    }
+    
+    #inspect-stats {
+        text-align: right;
+        color: $text-muted;
+    }
+    
+    #content-scroll {
+        height: 100%;
+    }
+    
+    #inspect-tree {
+        height: 100%;
+        border: none;
+    }
+    
+    #json-view {
+        height: 100%;
+        border: none;
+        padding: 1;
+    }
+    
+    .hidden {
+        display: none;
+    }
+    
+    Footer {
+        height: 1;
+    }
+    """
+    
     BINDINGS = [
         Binding("escape", "dismiss", "Back"),
         Binding("/", "focus_search", "Search"),
@@ -53,27 +111,18 @@ class InspectViewScreen(Screen):
     
     def compose(self) -> ComposeResult:
         """Create the inspect view UI."""
-        yield Header()
+        # Compact header
+        with Horizontal(id="inspect-header"):
+            yield Label(f"🔍 {self.container.name[:30]}", id="container-title")
+            yield Input(placeholder="Search...", id="search-input")
+            yield Label("", id="match-status")
+            yield Label(f"{self.view_mode[:4].upper()}", id="view-mode")
+            yield Label("", id="inspect-stats")
         
-        with Vertical(id="inspect-main"):
-            # Title
-            with Horizontal(id="inspect-header"):
-                yield Label(f"🔍 Inspect: {self.container.name}", id="container-title")
-                yield Label("", id="inspect-stats")
-            
-            # Search bar
-            with Horizontal(id="search-bar"):
-                yield Label("Search:")
-                yield Input(placeholder="Search in JSON...", id="search-input")
-                yield Label("", id="match-status")
-                yield Label(f"Mode: {self.view_mode.upper()}", id="view-mode")
-            
-            # Content area
-            with ScrollableContainer(id="content-scroll"):
-                # Tree view (default)
-                yield Tree("Container Data", id="inspect-tree")
-                # JSON view (hidden initially)
-                yield Static("", id="json-view", classes="hidden")
+        # Content area taking most space
+        with ScrollableContainer(id="content-scroll"):
+            yield Tree("Container Data", id="inspect-tree")
+            yield Static("", id="json-view", classes="hidden")
         
         yield Footer()
     
