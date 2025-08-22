@@ -7,19 +7,305 @@ Advanced log viewer using Textual with search, filter, and normalization.
 import re
 import subprocess
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from datetime import datetime
+from pathlib import Path
 
 from textual import on, work
 from textual.app import ComposeResult
-from textual.screen import Screen
-from textual.widgets import Header, Footer, RichLog, Input, Label, Static, Button
-from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
+from textual.screen import Screen, ModalScreen
+from textual.widgets import Header, Footer, RichLog, Input, Label, Static, Button, RadioSet, RadioButton
+from textual.containers import Container, Horizontal, Vertical, ScrollableContainer, Grid
 from textual.binding import Binding
 from textual.reactive import reactive
 from textual.message import Message
 from rich.text import Text
 from rich.syntax import Syntax
+import time
+import json
+
+
+class TimeFilterDialog(ModalScreen):
+    """Dialog for setting time range filter."""
+    
+    CSS = """
+    TimeFilterDialog {
+        align: center middle;
+    }
+    
+    #dialog {
+        width: 70;
+        height: 20;
+        border: thick $background 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+    
+    #dialog-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    
+    .field-label {
+        width: 12;
+        margin-top: 1;
+    }
+    
+    Input {
+        width: 50;
+        margin-top: 1;
+    }
+    
+    #button-container {
+        align: center middle;
+        margin-top: 2;
+    }
+    
+    Button {
+        margin: 0 1;
+    }
+    """
+    
+    def __init__(self, from_time: str = "", to_time: str = ""):
+        super().__init__()
+        self.from_time = from_time
+        self.to_time = to_time
+    
+    def compose(self) -> ComposeResult:
+        with Container(id="dialog"):
+            yield Label("Time Range Filter", id="dialog-title")
+            yield Label(f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            yield Label("Format: YYYY-MM-DD HH:MM:SS (or partial like '2024-01-01')")
+            yield Label("")
+            
+            with Horizontal():
+                yield Label("From time:", classes="field-label")
+                yield Input(value=self.from_time, id="from-input", placeholder="Leave empty for no filter")
+            
+            with Horizontal():
+                yield Label("To time:", classes="field-label")
+                yield Input(value=self.to_time, id="to-input", placeholder="Leave empty for current time")
+            
+            with Horizontal(id="button-container"):
+                yield Button("Apply", variant="primary", id="apply")
+                yield Button("Clear", variant="warning", id="clear")
+                yield Button("Cancel", variant="default", id="cancel")
+    
+    def on_mount(self) -> None:
+        """Focus the first input field when mounted."""
+        self.query_one("#from-input", Input).focus()
+    
+    @on(Input.Submitted)
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key in input fields."""
+        # Move to next field or apply
+        if event.input.id == "from-input":
+            self.query_one("#to-input", Input).focus()
+        else:
+            self.apply_filter()
+    
+    @on(Button.Pressed, "#apply")
+    def apply_filter(self) -> None:
+        from_input = self.query_one("#from-input", Input)
+        to_input = self.query_one("#to-input", Input)
+        self.dismiss({'from': from_input.value, 'to': to_input.value})
+    
+    @on(Button.Pressed, "#clear")
+    def clear_filter(self) -> None:
+        self.dismiss({'from': '', 'to': ''})
+    
+    @on(Button.Pressed, "#cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+    
+    def on_key(self, event) -> None:
+        """Handle ESC key to cancel."""
+        if event.key == "escape":
+            self.dismiss(None)
+
+
+class TailLinesDialog(ModalScreen):
+    """Dialog for setting tail lines."""
+    
+    CSS = """
+    TailLinesDialog {
+        align: center middle;
+    }
+    
+    #dialog {
+        width: 50;
+        height: 12;
+        border: thick $background 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+    
+    #dialog-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    
+    Input {
+        width: 100%;
+        margin: 1 0;
+    }
+    
+    #button-container {
+        align: center middle;
+        margin-top: 1;
+    }
+    
+    Button {
+        margin: 0 1;
+    }
+    """
+    
+    def __init__(self, current_tail: int = 1000):
+        super().__init__()
+        self.current_tail = current_tail
+    
+    def compose(self) -> ComposeResult:
+        with Container(id="dialog"):
+            yield Label("Change Number of Log Lines", id="dialog-title")
+            yield Label("Enter number of lines to show:")
+            yield Label("(0 = all lines, default = 1000)")
+            yield Input(value=str(self.current_tail) if self.current_tail > 0 else "", 
+                       id="tail-input", 
+                       placeholder="Number of lines")
+            
+            with Horizontal(id="button-container"):
+                yield Button("Apply", variant="primary", id="apply")
+                yield Button("Cancel", variant="default", id="cancel")
+    
+    def on_mount(self) -> None:
+        """Focus the input field when mounted."""
+        self.query_one("#tail-input", Input).focus()
+    
+    @on(Input.Submitted, "#tail-input")
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key in input field."""
+        self.apply_tail()
+    
+    @on(Button.Pressed, "#apply")
+    def apply_tail(self) -> None:
+        tail_input = self.query_one("#tail-input", Input)
+        try:
+            new_tail = int(tail_input.value) if tail_input.value else 1000
+            if new_tail < 0:
+                new_tail = 0
+            self.dismiss(new_tail)
+        except ValueError:
+            self.app.notify("Invalid number! Please enter a valid integer.", severity="error")
+    
+    @on(Button.Pressed, "#cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+    
+    def on_key(self, event) -> None:
+        """Handle ESC key to cancel."""
+        if event.key == "escape":
+            self.dismiss(None)
+
+
+class ExportDialog(ModalScreen):
+    """Dialog for exporting logs."""
+    
+    CSS = """
+    ExportDialog {
+        align: center middle;
+    }
+    
+    #dialog {
+        width: 60;
+        height: 15;
+        border: thick $background 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+    
+    #dialog-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    
+    RadioSet {
+        width: 100%;
+        height: 4;
+        margin: 1 0;
+    }
+    
+    Input {
+        width: 100%;
+        margin: 1 0;
+    }
+    
+    #button-container {
+        align: center middle;
+        margin-top: 1;
+    }
+    
+    Button {
+        margin: 0 1;
+    }
+    """
+    
+    def compose(self) -> ComposeResult:
+        with Container(id="dialog"):
+            yield Label("Export Logs", id="dialog-title")
+            yield Label("Select export location:")
+            
+            with RadioSet(id="location-choice"):
+                yield RadioButton("Current directory", value=True)
+                yield RadioButton("Custom path")
+            
+            yield Input(placeholder="Enter custom path (if selected)", 
+                       id="custom-path", 
+                       disabled=True)
+            
+            with Horizontal(id="button-container"):
+                yield Button("Export", variant="primary", id="export")
+                yield Button("Cancel", variant="default", id="cancel")
+    
+    def on_mount(self) -> None:
+        """Set initial focus."""
+        self.query_one("#location-choice", RadioSet).focus()
+    
+    @on(RadioSet.Changed)
+    def radio_changed(self, event: RadioSet.Changed) -> None:
+        custom_input = self.query_one("#custom-path", Input)
+        custom_input.disabled = event.index == 0
+        if event.index == 1:
+            custom_input.focus()
+    
+    @on(Input.Submitted, "#custom-path")
+    def on_path_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key in custom path input."""
+        self.export_logs()
+    
+    @on(Button.Pressed, "#export")
+    def export_logs(self) -> None:
+        radio_set = self.query_one("#location-choice", RadioSet)
+        custom_path = self.query_one("#custom-path", Input)
+        
+        if radio_set.pressed_index == 0:
+            self.dismiss({'type': 'current_dir'})
+        else:
+            if custom_path.value:
+                self.dismiss({'type': 'custom_path', 'path': custom_path.value})
+            else:
+                self.app.notify("Please enter a custom path", severity="error")
+    
+    @on(Button.Pressed, "#cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+    
+    def on_key(self, event) -> None:
+        """Handle ESC key to cancel."""
+        if event.key == "escape":
+            self.dismiss(None)
 
 
 class LogViewScreen(Screen):
@@ -65,18 +351,26 @@ class LogViewScreen(Screen):
     """
     
     BINDINGS = [
-        Binding("escape", "dismiss", "Back"),
-        Binding("n", "toggle_normalize", "Toggle Normalize"),
+        Binding("escape", "dismiss", "Back/Clear"),
+        Binding("n", "next_search_or_normalize", "Next/Normalize"),
+        Binding("shift+n", "prev_search", "Prev Match"),
         Binding("w", "toggle_wrap", "Toggle Wrap"),
         Binding("/", "focus_search", "Search"),
-        Binding("f", "focus_filter", "Filter"),
+        Binding("\\", "focus_filter", "Filter"),
+        Binding("f", "toggle_follow", "Follow"),
         Binding("ctrl+c", "copy_selection", "Copy"),
         Binding("g", "go_top", "Top"),
         Binding("shift+g", "go_bottom", "Bottom"),
-        Binding("t", "toggle_timestamps", "Timestamps"),
+        Binding("t", "show_tail_dialog", "Tail Lines"),
+        Binding("shift+t", "toggle_timestamps", "Timestamps"),
         Binding("c", "clear_logs", "Clear"),
-        Binding("r", "refresh", "Refresh"),
-        Binding("s", "save_logs", "Save"),
+        Binding("r", "show_time_filter", "Time Filter"),
+        Binding("e", "export_logs", "Export"),
+        Binding("s", "toggle_case_sensitive", "Case Toggle"),
+        Binding("pageup", "page_up", "Page Up", show=False),
+        Binding("pagedown", "page_down", "Page Down", show=False),
+        Binding("home", "go_top", "Home", show=False),
+        Binding("end", "go_bottom", "End", show=False),
     ]
     
     # Reactive properties
@@ -87,6 +381,10 @@ class LogViewScreen(Screen):
     filter_term = reactive("")
     current_match_index = reactive(0)
     total_matches = reactive(0)
+    case_sensitive = reactive(False)
+    tail_lines = reactive(1000)
+    time_filter_from = reactive("")
+    time_filter_to = reactive("")
     
     def __init__(self, container, app_instance=None):
         super().__init__()
@@ -97,7 +395,9 @@ class LogViewScreen(Screen):
         self.matches = []
         self.is_following = True
         self.log_offset = 0
-        self.max_lines = 10000  # Maximum lines to keep in memory
+        self.max_lines = 25000  # Maximum lines to keep in memory
+        self.last_log_time = time.time()
+        self.log_update_interval = 2.0
         
         # Path to normalize script
         self.normalize_script = os.path.join(
@@ -112,7 +412,7 @@ class LogViewScreen(Screen):
             yield Label(f"📦 {self.container.name[:30]}", id="container-name")
             yield Input(placeholder="Search...", id="search-input", classes="compact-input")
             yield Input(placeholder="Filter...", id="filter-input", classes="compact-input")
-            yield Label(f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'}", id="status-compact")
+            yield Label(f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'} F:{'ON' if self.is_following else 'OFF'}", id="status-compact")
             yield Label("", id="log-stats")
         
         # Log content taking up most space
@@ -122,7 +422,7 @@ class LogViewScreen(Screen):
     
     async def on_mount(self) -> None:
         """Initialize log viewer when mounted."""
-        self.set_interval(2.0, self.refresh_logs)
+        self.set_interval(self.log_update_interval, self.refresh_logs)
         self.load_initial_logs()
     
     @work(thread=True)
@@ -130,11 +430,21 @@ class LogViewScreen(Screen):
         """Load initial container logs."""
         try:
             # Get logs with timestamps
-            logs = self.container.logs(
-                tail=1000,
-                timestamps=True,
-                follow=False
-            ).decode('utf-8', errors='replace')
+            log_params = {
+                'timestamps': True,
+                'follow': False
+            }
+            
+            if self.tail_lines > 0:
+                log_params['tail'] = self.tail_lines
+            
+            logs = self.container.logs(**log_params).decode('utf-8', errors='replace')
+            
+            # Limit to max_lines to prevent memory issues
+            lines = logs.strip().split('\n') if logs else []
+            if len(lines) > self.max_lines:
+                lines = lines[-self.max_lines:]
+                logs = '\n'.join(lines)
             
             # Call the handler directly from the worker thread
             self.app.call_from_thread(self.handle_logs_loaded, logs, True, False)
@@ -149,11 +459,13 @@ class LogViewScreen(Screen):
         
         try:
             # Get new logs since last refresh
-            logs = self.container.logs(
-                tail=100,
-                timestamps=True,
-                follow=False
-            ).decode('utf-8', errors='replace')
+            log_params = {
+                'tail': min(100, self.tail_lines) if self.tail_lines > 0 else 100,
+                'timestamps': True,
+                'follow': False
+            }
+            
+            logs = self.container.logs(**log_params).decode('utf-8', errors='replace')
             
             self.app.call_from_thread(self.handle_logs_loaded, logs, False, False)
         except:
@@ -180,8 +492,24 @@ class LogViewScreen(Screen):
         if initial:
             self.raw_logs = new_lines
         else:
-            # Append new logs and trim old ones
-            self.raw_logs.extend(new_lines)
+            # Check for duplicates before adding
+            if self.raw_logs and new_lines:
+                # Find where new logs actually start (avoid duplicates)
+                last_existing = self.raw_logs[-1] if self.raw_logs else ""
+                new_start = 0
+                
+                for i, line in enumerate(new_lines):
+                    if line == last_existing:
+                        new_start = i + 1
+                        break
+                
+                if new_start < len(new_lines):
+                    truly_new = new_lines[new_start:]
+                    self.raw_logs.extend(truly_new)
+            else:
+                self.raw_logs.extend(new_lines)
+            
+            # Trim old logs if exceeding limit
             if len(self.raw_logs) > self.max_lines:
                 self.raw_logs = self.raw_logs[-self.max_lines:]
         
@@ -199,7 +527,11 @@ class LogViewScreen(Screen):
         else:
             self.processed_logs = self.raw_logs
         
-        # Apply filter
+        # Apply time filter
+        if self.time_filter_from or self.time_filter_to:
+            self.processed_logs = self.filter_logs_by_time(self.processed_logs)
+        
+        # Apply text filter
         if self.filter_term:
             self.processed_logs = self.filter_logs(self.processed_logs, self.filter_term)
         
@@ -258,43 +590,256 @@ class LogViewScreen(Screen):
         
         return filtered
     
-    def parse_filter_expression(self, expr: str) -> List[Tuple[str, str]]:
-        """Parse filter expression into tokens."""
-        tokens = []
-        parts = expr.split()
+    def parse_filter_expression(self, filter_string: str) -> List[Tuple[str, str]]:
+        """Parse filter expression with AND/OR operators and parentheses.
         
-        for part in parts:
-            if part.upper() in ('AND', 'OR', 'NOT'):
-                tokens.append(('OP', part.upper()))
+        Supports:
+        - Basic terms: word, +word (include), -word/!word (exclude)
+        - AND operator: word AND word
+        - OR operator: word OR word  
+        - Parentheses: (word OR word) AND word
+        - Quoted strings: "multi word phrase"
+        """
+        if not filter_string:
+            return []
+        
+        tokens = []
+        current_token = ""
+        in_quotes = False
+        i = 0
+        
+        while i < len(filter_string):
+            char = filter_string[i]
+            
+            if char == '"':
+                if in_quotes:
+                    # End of quoted string
+                    if current_token:
+                        tokens.append(('TERM', current_token))
+                        current_token = ""
+                    in_quotes = False
+                else:
+                    # Start of quoted string
+                    if current_token:
+                        tokens.append(('TERM', current_token))
+                        current_token = ""
+                    in_quotes = True
+            elif char == ' ' and not in_quotes:
+                if current_token:
+                    # Check if it's an operator
+                    if current_token.upper() == 'AND':
+                        tokens.append(('AND', 'AND'))
+                    elif current_token.upper() == 'OR':
+                        tokens.append(('OR', 'OR'))
+                    else:
+                        tokens.append(('TERM', current_token))
+                    current_token = ""
+            elif char == '(' and not in_quotes:
+                if current_token:
+                    tokens.append(('TERM', current_token))
+                    current_token = ""
+                tokens.append(('LPAREN', '('))
+            elif char == ')' and not in_quotes:
+                if current_token:
+                    tokens.append(('TERM', current_token))
+                    current_token = ""
+                tokens.append(('RPAREN', ')'))
             else:
-                tokens.append(('TERM', part))
+                current_token += char
+            i += 1
+        
+        # Add the last token
+        if current_token:
+            if current_token.upper() == 'AND':
+                tokens.append(('AND', 'AND'))
+            elif current_token.upper() == 'OR':
+                tokens.append(('OR', 'OR'))
+            else:
+                tokens.append(('TERM', current_token))
+        
+        # If no operators, treat as implicit AND between terms
+        if not any(t[0] in ('AND', 'OR') for t in tokens):
+            # Insert AND between consecutive terms
+            new_tokens = []
+            for i, token in enumerate(tokens):
+                new_tokens.append(token)
+                if (i < len(tokens) - 1 and 
+                    token[0] in ('TERM', 'RPAREN') and 
+                    tokens[i+1][0] in ('TERM', 'LPAREN')):
+                    new_tokens.append(('AND', 'AND'))
+            tokens = new_tokens
         
         return tokens
     
     def evaluate_filter(self, tokens: List[Tuple[str, str]], line: str) -> bool:
-        """Evaluate filter tokens against a line."""
+        """Evaluate parsed filter tokens against a log line.
+        
+        Uses a recursive descent parser to evaluate the expression.
+        """
         if not tokens:
             return True
         
-        line_lower = line.lower()
-        result = True
-        current_op = 'AND'
+        flags = 0 if self.case_sensitive else re.IGNORECASE
         
-        for token_type, token_value in tokens:
-            if token_type == 'OP':
-                current_op = token_value
-            elif token_type == 'TERM':
-                term_result = token_value.lower() in line_lower
+        def evaluate_term(term: str, line: str) -> bool:
+            """Evaluate a single term against the line."""
+            # Handle exclusion operators
+            if term.startswith('!') or term.startswith('-'):
+                search_term = term[1:]
+                if search_term:
+                    pattern = re.compile(re.escape(search_term), flags)
+                    return not pattern.search(line)
+                return True
+            # Handle explicit inclusion
+            elif term.startswith('+'):
+                search_term = term[1:]
+            else:
+                search_term = term
+            
+            if search_term:
+                pattern = re.compile(re.escape(search_term), flags)
+                return bool(pattern.search(line))
+            return True
+        
+        def parse_expression(pos: int = 0) -> Tuple[bool, int]:
+            """Parse and evaluate expression starting at position pos."""
+            if pos >= len(tokens):
+                return True, pos
+            
+            # Parse primary expression (term or parenthesized expression)
+            token_type, token_value = tokens[pos]
+            
+            if token_type == 'TERM':
+                result = evaluate_term(token_value, line)
+                pos += 1
+            elif token_type == 'LPAREN':
+                # Parse expression inside parentheses
+                result, pos = parse_expression(pos + 1)
+                if pos < len(tokens) and tokens[pos][0] == 'RPAREN':
+                    pos += 1  # Skip closing paren
+            else:
+                return True, pos
+            
+            # Handle operators
+            while pos < len(tokens):
+                token_type, token_value = tokens[pos]
                 
-                if current_op == 'NOT':
-                    term_result = not term_result
-                    current_op = 'AND'  # Reset after NOT
-                elif current_op == 'OR':
-                    result = result or term_result
-                else:  # AND
-                    result = result and term_result
+                if token_type == 'AND':
+                    pos += 1
+                    if pos < len(tokens):
+                        right_result, pos = parse_expression(pos)
+                        result = result and right_result
+                    else:
+                        break
+                elif token_type == 'OR':
+                    pos += 1
+                    if pos < len(tokens):
+                        right_result, pos = parse_expression(pos)
+                        result = result or right_result
+                    else:
+                        break
+                elif token_type == 'RPAREN':
+                    # End of parenthesized expression
+                    break
+                else:
+                    break
+            
+            return result, pos
         
+        result, _ = parse_expression()
         return result
+    
+    def extract_log_timestamp(self, log_line: str) -> Optional[datetime]:
+        """Extract timestamp from a log line."""
+        # Common timestamp patterns in logs
+        patterns = [
+            # Docker format: 2024-01-01T12:00:00.000000000Z
+            r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6,9}Z?)',
+            # ISO 8601 format: 2024-01-01T12:00:00.000Z
+            r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,3}Z?)',
+            # ISO 8601 without microseconds: 2024-01-01T12:00:00Z
+            r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?)',
+            # Standard format: 2024-01-01 12:00:00
+            r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})',
+            # Time only: 12:00:00
+            r'(\d{2}:\d{2}:\d{2})'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, log_line)
+            if match:
+                timestamp_str = match.group(1)
+                
+                # Try to parse the timestamp
+                formats = [
+                    '%Y-%m-%dT%H:%M:%S.%fZ',
+                    '%Y-%m-%dT%H:%M:%S.%f',
+                    '%Y-%m-%dT%H:%M:%SZ',
+                    '%Y-%m-%dT%H:%M:%S',
+                    '%Y-%m-%d %H:%M:%S',
+                    '%H:%M:%S'
+                ]
+                
+                for fmt in formats:
+                    try:
+                        parsed = datetime.strptime(timestamp_str, fmt)
+                        
+                        # For formats without year, use current year
+                        if '%Y' not in fmt:
+                            parsed = parsed.replace(year=datetime.now().year)
+                        if '%m' not in fmt and '%d' not in fmt:
+                            # Time only - use today's date
+                            today = datetime.now().date()
+                            parsed = datetime.combine(today, parsed.time())
+                        
+                        return parsed
+                    except ValueError:
+                        continue
+        
+        return None
+    
+    def filter_logs_by_time(self, logs: List[str]) -> List[str]:
+        """Filter logs by time range."""
+        if not self.time_filter_from and not self.time_filter_to:
+            return logs
+        
+        filtered = []
+        from_dt = None
+        to_dt = None
+        
+        # Parse time bounds
+        if self.time_filter_from:
+            try:
+                from_dt = datetime.strptime(self.time_filter_from, '%Y-%m-%d %H:%M:%S')
+            except:
+                try:
+                    from_dt = datetime.strptime(self.time_filter_from, '%Y-%m-%d')
+                except:
+                    pass
+        
+        if self.time_filter_to:
+            try:
+                to_dt = datetime.strptime(self.time_filter_to, '%Y-%m-%d %H:%M:%S')
+            except:
+                try:
+                    to_dt = datetime.strptime(self.time_filter_to, '%Y-%m-%d')
+                except:
+                    pass
+        
+        for line in logs:
+            log_time = self.extract_log_timestamp(line)
+            
+            if log_time:
+                # Check if log time is within range
+                if from_dt and log_time < from_dt:
+                    continue
+                if to_dt and log_time > to_dt:
+                    continue
+                
+                filtered.append(line)
+            # Note: logs without timestamps are excluded when time filtering is active
+        
+        return filtered
     
     def format_log_line(self, line: str, index: int) -> Text:
         """Format a log line with colors and highlighting."""
@@ -328,7 +873,8 @@ class LogViewScreen(Screen):
         
         # Apply search highlighting
         if self.search_term:
-            pattern = re.compile(re.escape(self.search_term), re.IGNORECASE)
+            flags = 0 if self.case_sensitive else re.IGNORECASE
+            pattern = re.compile(re.escape(self.search_term), flags)
             matches = list(pattern.finditer(line))
             
             if matches:
@@ -339,7 +885,11 @@ class LogViewScreen(Screen):
                     # Add text before match
                     text.append(line[last_end:match.start()], style=style)
                     # Add highlighted match
-                    text.append(line[match.start():match.end()], style="reverse yellow")
+                    if index == self.matches[self.current_match_index] if self.matches else False:
+                        # Current match - different highlight
+                        text.append(line[match.start():match.end()], style="reverse bold yellow")
+                    else:
+                        text.append(line[match.start():match.end()], style="reverse yellow")
                     last_end = match.end()
                 
                 # Add remaining text
@@ -357,30 +907,59 @@ class LogViewScreen(Screen):
             stats_label = self.query_one("#log-stats", Label)
             stats = f"L:{len(self.raw_logs)}"
             
+            if self.tail_lines > 0:
+                stats += f" T:{self.tail_lines}"
+            
+            if self.time_filter_from or self.time_filter_to:
+                stats += " [TIME]"
+            
             if self.filter_term:
                 stats += f" F:{len(self.processed_logs)}"
             
             if self.search_term and self.matches:
-                stats += f" M:{len(self.matches)}"
+                stats += f" M:{self.current_match_index+1}/{len(self.matches)}"
+            
+            if self.case_sensitive:
+                stats += " [CS]"
             
             stats_label.update(stats)
+            
+            # Update status compact
+            status_label = self.query_one("#status-compact", Label)
+            status_label.update(
+                f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'} F:{'ON' if self.is_following else 'OFF'}"
+            )
         except:
             pass  # Silently fail if stats label doesn't exist
     
     def action_dismiss(self) -> None:
-        """Go back to main screen."""
-        self.app.pop_screen()
+        """Go back to main screen or clear filters."""
+        # If filters are active, clear them first
+        if self.filter_term or self.search_term or self.time_filter_from or self.time_filter_to:
+            self.clear_filters()
+        else:
+            self.app.pop_screen()
     
-    def action_toggle_normalize(self) -> None:
-        """Toggle log normalization."""
-        self.normalize_enabled = not self.normalize_enabled
-        try:
-            self.query_one("#status-compact", Label).update(
-                f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'}"
-            )
-        except:
-            pass
-        self.process_and_display_logs()
+    def action_next_search_or_normalize(self) -> None:
+        """Next search match or toggle normalization."""
+        if self.search_term and self.matches:
+            self.next_match()
+        else:
+            self.normalize_enabled = not self.normalize_enabled
+            self.process_and_display_logs()
+    
+    def action_prev_search(self) -> None:
+        """Previous search match."""
+        if self.search_term and self.matches:
+            self.prev_match()
+    
+    def action_toggle_follow(self) -> None:
+        """Toggle follow mode."""
+        self.is_following = not self.is_following
+        self.update_stats()
+        if self.is_following:
+            log_widget = self.query_one("#log-content", RichLog)
+            log_widget.scroll_end()
     
     def action_toggle_wrap(self) -> None:
         """Toggle line wrapping."""
@@ -408,6 +987,10 @@ class LogViewScreen(Screen):
         """Focus filter input."""
         self.query_one("#filter-input", Input).focus()
     
+    def action_refresh(self) -> None:
+        """Refresh logs manually."""
+        self.refresh_logs()
+    
     def action_go_top(self) -> None:
         """Scroll to top."""
         log_widget = self.query_one("#log-content", RichLog)
@@ -428,23 +1011,105 @@ class LogViewScreen(Screen):
         log_widget.clear()
         self.update_stats()
     
-    def action_refresh(self) -> None:
-        """Refresh logs manually."""
-        self.refresh_logs()
+    def action_show_time_filter(self) -> None:
+        """Show time filter dialog."""
+        def handle_result(result):
+            if result is not None:
+                self.time_filter_from = result['from']
+                self.time_filter_to = result['to']
+                self.process_and_display_logs()
+        
+        self.app.push_screen(
+            TimeFilterDialog(self.time_filter_from, self.time_filter_to),
+            handle_result
+        )
     
-    def action_save_logs(self) -> None:
-        """Save logs to file."""
+    def action_show_tail_dialog(self) -> None:
+        """Show tail lines dialog."""
+        def handle_result(result):
+            if result is not None:
+                self.tail_lines = result
+                # Reload logs with new tail value
+                self.load_initial_logs()
+        
+        self.app.push_screen(TailLinesDialog(self.tail_lines), handle_result)
+    
+    def action_toggle_case_sensitive(self) -> None:
+        """Toggle case sensitive search/filter."""
+        self.case_sensitive = not self.case_sensitive
+        self.process_and_display_logs()
+    
+    def action_page_up(self) -> None:
+        """Scroll up one page."""
+        log_widget = self.query_one("#log-content", RichLog)
+        log_widget.scroll_page_up()
+        self.is_following = False
+    
+    def action_page_down(self) -> None:
+        """Scroll down one page."""
+        log_widget = self.query_one("#log-content", RichLog)
+        log_widget.scroll_page_down()
+        self.is_following = False
+    
+    def action_export_logs(self) -> None:
+        """Export logs with dialog."""
+        def handle_result(result):
+            if result:
+                self.export_logs_to_file(result)
+        
+        self.app.push_screen(ExportDialog(), handle_result)
+    
+    def export_logs_to_file(self, export_config: dict) -> None:
+        """Export logs to file with metadata."""
         try:
-            filename = f"{self.container.name}_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-            with open(filename, 'w') as f:
-                f.write('\n'.join(self.raw_logs))
-            self.app.notify(f"Logs saved to {filename}")
+            # Determine export path
+            if export_config['type'] == 'current_dir':
+                export_dir = Path.cwd()
+            else:
+                export_dir = Path(export_config['path'])
+                if not export_dir.exists():
+                    export_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"{self.container.name}_logs_{timestamp}.txt"
+            filepath = export_dir / filename
+            
+            # Prepare filter info
+            filter_info = {}
+            if self.filter_term:
+                filter_info['text_filter'] = self.filter_term
+            if self.time_filter_from or self.time_filter_to:
+                filter_info['time_filter'] = f"From: {self.time_filter_from or 'start'} To: {self.time_filter_to or 'now'}"
+            if self.search_term:
+                filter_info['search_term'] = self.search_term
+            
+            # Write logs with metadata
+            with open(filepath, 'w', encoding='utf-8') as f:
+                # Write header with export info
+                f.write(f"# Docker Container Logs Export\n")
+                f.write(f"# Container: {self.container.name}\n")
+                f.write(f"# Export Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"# Total Lines: {len(self.processed_logs)}\n")
+                
+                if filter_info:
+                    f.write(f"# Filters Applied:\n")
+                    for key, value in filter_info.items():
+                        f.write(f"#   {key}: {value}\n")
+                
+                f.write(f"# {'=' * 50}\n\n")
+                
+                # Write the actual logs
+                for line in self.processed_logs:
+                    f.write(line + '\n')
+            
+            self.app.notify(f"Logs exported to {filepath}")
         except Exception as e:
-            self.app.notify(f"Failed to save logs: {e}", severity="error")
+            self.app.notify(f"Failed to export logs: {e}", severity="error")
     
-    @on(Input.Changed, "#search-input")
-    def on_search_changed(self, event: Input.Changed) -> None:
-        """Handle search input change."""
+    @on(Input.Submitted, "#search-input")
+    def on_search_submitted(self, event: Input.Submitted) -> None:
+        """Handle search input submission."""
         self.search_term = event.value
         self.current_match_index = 0
         self.process_and_display_logs()
@@ -452,10 +1117,11 @@ class LogViewScreen(Screen):
         # Jump to first match
         if self.matches:
             self.jump_to_match(0)
+            self.is_following = False
     
-    @on(Input.Changed, "#filter-input")
-    def on_filter_changed(self, event: Input.Changed) -> None:
-        """Handle filter input change."""
+    @on(Input.Submitted, "#filter-input")
+    def on_filter_submitted(self, event: Input.Submitted) -> None:
+        """Handle filter input submission."""
         self.filter_term = event.value
         self.process_and_display_logs()
     
@@ -468,6 +1134,8 @@ class LogViewScreen(Screen):
             pass
         self.search_term = ""
         self.filter_term = ""
+        self.time_filter_from = ""
+        self.time_filter_to = ""
         self.process_and_display_logs()
     
     def jump_to_match(self, index: int) -> None:
@@ -476,6 +1144,28 @@ class LogViewScreen(Screen):
             return
         
         self.current_match_index = index
-        # Would need to implement scrolling to specific line
-        # This is a simplified version
+        match_line = self.matches[index]
+        
+        # Scroll to the match line
+        log_widget = self.query_one("#log-content", RichLog)
+        # Calculate approximate position (RichLog doesn't have direct line scrolling)
+        # This is a workaround - scroll to approximate position
+        if len(self.processed_logs) > 0:
+            scroll_percentage = match_line / len(self.processed_logs)
+            log_widget.scroll_to(y=int(log_widget.virtual_size.height * scroll_percentage))
+        
         self.update_stats()
+    
+    def next_match(self) -> None:
+        """Move to next search match."""
+        if self.matches:
+            self.current_match_index = (self.current_match_index + 1) % len(self.matches)
+            self.jump_to_match(self.current_match_index)
+            self.is_following = False
+    
+    def prev_match(self) -> None:
+        """Move to previous search match."""
+        if self.matches:
+            self.current_match_index = (self.current_match_index - 1) % len(self.matches)
+            self.jump_to_match(self.current_match_index)
+            self.is_following = False
