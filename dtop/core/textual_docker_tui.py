@@ -168,7 +168,6 @@ class DockerTUIApp(App):
     
     #filter-input {
         width: 20;
-        height: 1;
         margin: 0 1;
     }
     

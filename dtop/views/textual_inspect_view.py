@@ -39,7 +39,6 @@ class InspectViewScreen(Screen):
     
     #search-input {
         width: 25;
-        height: 1;
         margin: 0 1;
     }
     
