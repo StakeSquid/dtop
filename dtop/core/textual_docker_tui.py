@@ -306,6 +306,10 @@ class DockerTUIApp(App):
         await self.connect_docker()
         await self.setup_table()
         await self.start_refresh_timers()
+        
+        # Focus the table for keyboard navigation
+        table = self.query_one("#container-table", DataTable)
+        table.focus()
     
     async def connect_docker(self) -> None:
         """Connect to Docker daemon."""
@@ -450,9 +454,11 @@ class DockerTUIApp(App):
         
         # Remember current selection
         current_row_key = None
+        current_row_index = 0
         if table.cursor_coordinate:
             try:
-                current_row_key = table.get_row_at(table.cursor_coordinate.row)[0]
+                current_row_index = table.cursor_coordinate.row
+                current_row_key = table.get_row_at(current_row_index)[0]
             except:
                 pass
         
@@ -464,11 +470,22 @@ class DockerTUIApp(App):
             table.add_row(*row_data, key=container.id)
         
         # Restore selection if possible
-        if current_row_key:
+        if current_row_key and table.row_count > 0:
+            # Try to find the same container
+            found = False
             for i, row_key in enumerate(table.rows):
-                if row_key == current_row_key:
+                if row_key.value == current_row_key.value:
                     table.cursor_coordinate = Coordinate(i, 0)
+                    found = True
                     break
+            
+            # If not found, try to maintain position
+            if not found and table.row_count > 0:
+                new_index = min(current_row_index, table.row_count - 1)
+                table.cursor_coordinate = Coordinate(new_index, 0)
+        elif table.row_count > 0:
+            # Set cursor to first row if no previous selection
+            table.cursor_coordinate = Coordinate(0, 0)
     
     def build_row_data(self, container) -> List:
         """Build row data for a container."""
@@ -567,12 +584,20 @@ class DockerTUIApp(App):
         """Get currently selected container."""
         table = self.query_one("#container-table", DataTable)
         
-        if table.cursor_coordinate:
+        # Try to get from cursor coordinate
+        if table.cursor_coordinate and table.row_count > 0:
             try:
-                row_key = table.get_row_at(table.cursor_coordinate.row)[0]
-                return self.container_map.get(row_key)
-            except:
-                pass
+                row_index = table.cursor_coordinate.row
+                if 0 <= row_index < table.row_count:
+                    row_key = table.get_row_at(row_index)[0]
+                    if row_key and row_key.value:
+                        return self.container_map.get(row_key.value)
+            except Exception as e:
+                self.log.debug(f"Error getting selected container: {e}")
+        
+        # Fallback to stored selected container ID
+        if hasattr(self, 'selected_container_id') and self.selected_container_id:
+            return self.container_map.get(self.selected_container_id)
         
         return None
     
@@ -594,6 +619,18 @@ class DockerTUIApp(App):
         """Handle row selection."""
         if event.row_key:
             self.selected_container_id = event.row_key.value
+    
+    @on(DataTable.RowSelected)
+    def on_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle row double-click or Enter key."""
+        if event.row_key:
+            container = self.container_map.get(event.row_key.value)
+            if container:
+                def handle_action(action: str) -> None:
+                    if action:
+                        asyncio.create_task(self.execute_container_action(container, action))
+                
+                self.push_screen(ContainerActionModal(container), handle_action)
     
     @on(Input.Changed, "#filter-input")
     def on_filter_changed(self, event: Input.Changed) -> None:
