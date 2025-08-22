@@ -426,20 +426,21 @@ def schedule_stats_collection_sync(tui, containers):
                 rx_bytes, tx_bytes = parse_network_stats(stats)
                 
                 # Simple rate calculation (no previous values)
-                with tui.stats_lock:
-                    tui.stats_cache[container.id] = {
-                        'cpu': cpu_percent,
-                        'mem': mem_percent,
-                        'net_rx': rx_bytes,
-                        'net_tx': tx_bytes,
-                        'net_in_rate': 0,  # Can't calculate without history
-                        'net_out_rate': 0,
-                        'block_read': read_bytes,
-                        'block_write': write_bytes,
-                        'block_read_rate': 0,
-                        'block_write_rate': 0,
-                        'time': time.time()
-                    }
+                # For sync context, we can't use async lock, so just update directly
+                # The lock is mainly for the async context
+                tui.stats_cache[container.id] = {
+                    'cpu': cpu_percent,
+                    'mem': mem_percent,
+                    'net_rx': rx_bytes,
+                    'net_tx': tx_bytes,
+                    'net_in_rate': 0,  # Can't calculate without history
+                    'net_out_rate': 0,
+                    'block_read': read_bytes,
+                    'block_write': write_bytes,
+                    'block_read_rate': 0,
+                    'block_write_rate': 0,
+                    'time': time.time()
+                }
             except Exception:
                 pass
         return

@@ -79,7 +79,7 @@ class InspectViewScreen(Screen):
     
     async def on_mount(self) -> None:
         """Load container data when mounted."""
-        await self.load_inspect_data()
+        self.load_inspect_data()
     
     @work(thread=True)
     def load_inspect_data(self) -> None:

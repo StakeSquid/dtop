@@ -102,7 +102,7 @@ class LogViewScreen(Screen):
     async def on_mount(self) -> None:
         """Initialize log viewer when mounted."""
         self.set_interval(2.0, self.refresh_logs)
-        await self.load_initial_logs()
+        self.load_initial_logs()
     
     @work(thread=True)
     def load_initial_logs(self) -> None:
