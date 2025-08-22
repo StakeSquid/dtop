@@ -196,17 +196,17 @@ class LogViewScreen(Screen):
         
         # Apply normalization if enabled
         if self.normalize_enabled:
-            processed = self.normalize_logs(self.raw_logs)
+            self.processed_logs = self.normalize_logs(self.raw_logs)
         else:
-            processed = self.raw_logs
+            self.processed_logs = self.raw_logs
         
         # Apply filter
         if self.filter_term:
-            processed = self.filter_logs(processed, self.filter_term)
+            self.processed_logs = self.filter_logs(self.processed_logs, self.filter_term)
         
         # Apply search highlighting
         self.matches = []
-        for i, line in enumerate(processed):
+        for i, line in enumerate(self.processed_logs):
             display_line = self.format_log_line(line, i)
             log_widget.write(display_line)
         
@@ -354,20 +354,19 @@ class LogViewScreen(Screen):
     
     def update_stats(self) -> None:
         """Update statistics display."""
-        stats_label = self.query_one("#log-stats", Label)
-        stats = f"Lines: {len(self.raw_logs)}"
-        
-        if self.filter_term:
-            stats += f" | Filtered: {len(self.processed_logs)}"
-        
-        stats_label.update(stats)
-        
-        if self.search_term:
-            match_label = self.query_one("#match-status", Label)
-            if self.matches:
-                match_label.update(f"Matches: {len(self.matches)} | Current: {self.current_match_index + 1}")
-            else:
-                match_label.update("No matches")
+        try:
+            stats_label = self.query_one("#log-stats", Label)
+            stats = f"L:{len(self.raw_logs)}"
+            
+            if self.filter_term:
+                stats += f" F:{len(self.processed_logs)}"
+            
+            if self.search_term and self.matches:
+                stats += f" M:{len(self.matches)}"
+            
+            stats_label.update(stats)
+        except:
+            pass  # Silently fail if stats label doesn't exist
     
     def action_dismiss(self) -> None:
         """Go back to main screen."""
@@ -376,17 +375,23 @@ class LogViewScreen(Screen):
     def action_toggle_normalize(self) -> None:
         """Toggle log normalization."""
         self.normalize_enabled = not self.normalize_enabled
-        self.query_one("#norm-status", Label).update(
-            f"Normalize: {'ON' if self.normalize_enabled else 'OFF'}"
-        )
+        try:
+            self.query_one("#status-compact", Label).update(
+                f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'}"
+            )
+        except:
+            pass
         self.process_and_display_logs()
     
     def action_toggle_wrap(self) -> None:
         """Toggle line wrapping."""
         self.wrap_enabled = not self.wrap_enabled
-        self.query_one("#wrap-status", Label).update(
-            f"Wrap: {'ON' if self.wrap_enabled else 'OFF'}"
-        )
+        try:
+            self.query_one("#status-compact", Label).update(
+                f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'}"
+            )
+        except:
+            pass
         log_widget = self.query_one("#log-content", RichLog)
         log_widget.wrap = self.wrap_enabled
         self.process_and_display_logs()
@@ -394,9 +399,6 @@ class LogViewScreen(Screen):
     def action_toggle_timestamps(self) -> None:
         """Toggle timestamp display."""
         self.show_timestamps = not self.show_timestamps
-        self.query_one("#time-status", Label).update(
-            f"Timestamps: {'ON' if self.show_timestamps else 'OFF'}"
-        )
         self.process_and_display_logs()
     
     def action_focus_search(self) -> None:
@@ -458,11 +460,13 @@ class LogViewScreen(Screen):
         self.filter_term = event.value
         self.process_and_display_logs()
     
-    @on(Button.Pressed, "#clear-filters")
-    def on_clear_filters(self) -> None:
+    def clear_filters(self) -> None:
         """Clear search and filter."""
-        self.query_one("#search-input", Input).value = ""
-        self.query_one("#filter-input", Input).value = ""
+        try:
+            self.query_one("#search-input", Input).value = ""
+            self.query_one("#filter-input", Input).value = ""
+        except:
+            pass
         self.search_term = ""
         self.filter_term = ""
         self.process_and_display_logs()
