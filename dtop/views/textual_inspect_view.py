@@ -85,10 +85,10 @@ class InspectViewScreen(Screen):
     def load_inspect_data(self) -> None:
         """Load container inspection data."""
         try:
-            self.inspect_data = self.container.attrs
-            self.post_message(self.DataLoaded(self.inspect_data))
+            data = self.container.attrs
+            self.app.call_from_thread(self.handle_data_loaded, data, None)
         except Exception as e:
-            self.post_message(self.DataLoaded(None, error=str(e)))
+            self.app.call_from_thread(self.handle_data_loaded, None, str(e))
     
     class DataLoaded(Message):
         """Message when inspect data is loaded."""
@@ -97,13 +97,13 @@ class InspectViewScreen(Screen):
             self.data = data
             self.error = error
     
-    def on_data_loaded(self, message: DataLoaded) -> None:
+    def handle_data_loaded(self, data: Optional[Dict], error: Optional[str] = None) -> None:
         """Handle loaded inspect data."""
-        if message.error:
-            self.app.notify(f"Error loading data: {message.error}", severity="error")
+        if error:
+            self.app.notify(f"Error loading data: {error}", severity="error")
             return
         
-        self.inspect_data = message.data
+        self.inspect_data = data
         self.flattened_data = self.flatten_json(self.inspect_data)
         
         if self.view_mode == "tree":

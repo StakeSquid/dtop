@@ -115,9 +115,10 @@ class LogViewScreen(Screen):
                 follow=False
             ).decode('utf-8', errors='replace')
             
-            self.post_message(self.LogsLoaded(logs, initial=True))
+            # Call the handler directly from the worker thread
+            self.app.call_from_thread(self.handle_logs_loaded, logs, True, False)
         except Exception as e:
-            self.post_message(self.LogsLoaded(f"Error loading logs: {e}", error=True))
+            self.app.call_from_thread(self.handle_logs_loaded, f"Error loading logs: {e}", False, True)
     
     @work(thread=True)
     def refresh_logs(self) -> None:
@@ -133,7 +134,7 @@ class LogViewScreen(Screen):
                 follow=False
             ).decode('utf-8', errors='replace')
             
-            self.post_message(self.LogsLoaded(logs, initial=False))
+            self.app.call_from_thread(self.handle_logs_loaded, logs, False, False)
         except:
             pass  # Silently fail on refresh errors
     
@@ -145,17 +146,17 @@ class LogViewScreen(Screen):
             self.initial = initial
             self.error = error
     
-    def on_logs_loaded(self, message: LogsLoaded) -> None:
+    def handle_logs_loaded(self, logs: str, initial: bool = False, error: bool = False) -> None:
         """Handle loaded logs."""
-        if message.error:
+        if error:
             log_widget = self.query_one("#log-content", RichLog)
-            log_widget.write(Text(message.logs, style="red"))
+            log_widget.write(Text(logs, style="red"))
             return
         
         # Parse and store logs
-        new_lines = message.logs.strip().split('\n') if message.logs else []
+        new_lines = logs.strip().split('\n') if logs else []
         
-        if message.initial:
+        if initial:
             self.raw_logs = new_lines
         else:
             # Append new logs and trim old ones
