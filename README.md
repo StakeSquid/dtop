@@ -1,10 +1,10 @@
-# dtop - Docker Terminal UI
+# dtop v2 - Docker Terminal UI
 
 [![PyPI version](https://badge.fury.io/py/dtop.svg)](https://badge.fury.io/py/dtop)
 [![Python versions](https://img.shields.io/pypi/pyversions/dtop.svg)](https://pypi.org/project/dtop/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A high-performance terminal UI for Docker container management with real-time monitoring, advanced log viewing, and comprehensive container operations.
+A high-performance terminal UI for Docker container management, built with Python and the Textual framework. Features real-time monitoring, advanced log viewing, and comprehensive container operations.
 
 <img width="1611" alt="Screenshot 2025-05-24 at 6 39 12 PM" src="https://github.com/user-attachments/assets/e5697f99-fdd4-4d41-bd69-02072db5385c" />
 <img width="1611" alt="Screenshot 2025-05-24 at 6 39 21 PM" src="https://github.com/user-attachments/assets/0694304e-f256-47b5-923b-5c05ed0035b7" />
@@ -13,48 +13,311 @@ A high-performance terminal UI for Docker container management with real-time mo
 
 ## Features
 
-### 🚀 Core Functionality
-- **Real-time Monitoring**: Live CPU, memory, network, and disk I/O stats with parallel collection
-- **Container Management**: Complete lifecycle control (start, stop, pause, restart, recreate)
-- **Interactive Shell Access**: Direct exec into containers with terminal support
-- **Resource Monitoring**: Real-time performance metrics with color-coded indicators
+### Core Functionality
+- **Real-time Monitoring** - Live CPU, memory, network, and disk I/O statistics with parallel collection
+- **Container Management** - Complete lifecycle control (start, stop, pause, restart, remove, recreate)
+- **Dual Interface Modes** - Modern Textual UI (default) or legacy curses interface
+- **Responsive UI** - Automatically adjusts column widths to terminal size with configurable min/max constraints
 
-### 📋 Advanced Log Management
-- **Smart Log Normalization**: Automatic parsing and formatting of JSON, structured logs
-- **Powerful Search**: Full-text search with literal matching (no regex) and result highlighting
-- **Advanced Filtering**: Include/exclude patterns with complex boolean logic
-- **Time-based Filtering**: Filter logs by date/time ranges with export capabilities
-- **Follow Mode**: Real-time log streaming with auto-scroll
-- **Export Functionality**: Save filtered logs to files
+### Advanced Log Viewer
+- **Powerful Search** - Real-time search with regex support and match highlighting
+- **Complex Filtering** - Advanced filter expressions with AND/OR/NOT operators and parentheses
+- **Log Normalization** - Automatic parsing and standardization of log formats
+- **Time-based Filtering** - Filter logs by date/time range
+- **Export Functionality** - Save filtered logs with metadata
+- **Syntax Highlighting** - Color-coded log levels (ERROR, WARN, INFO, DEBUG)
+- **Follow Mode** - Auto-scroll to new log entries
+- **Tail Control** - Configurable number of lines to display
 
-### 🎯 User Experience
-- **Mouse Support**: Full mouse interaction for navigation, scrolling, and selection
-- **Responsive Design**: Auto-adjusting columns with manual resize capability
-- **Persistent Configuration**: Settings saved automatically between sessions
-- **Keyboard Shortcuts**: Comprehensive hotkey support for power users
-- **Visual Indicators**: Color-coded status, performance metrics, and alerts
+### Container Inspection
+- **Tree View** - Hierarchical display of container configuration
+- **JSON View** - Formatted JSON with syntax highlighting
+- **Search** - Find keys and values in container metadata
+- **Navigation** - Expand/collapse tree nodes, jump between matches
+
+### UI Features
+- **Customizable Columns** - Adjust min/max widths for each column (shortcut: C)
+- **Sortable Columns** - Click headers or use keyboard to sort by any field
+- **Container Filtering** - Real-time filtering by name, image, status, or ID
+- **Dark/Light Theme** - Toggle between themes (shortcut: D)
+- **Auto-refresh** - Configurable automatic refresh with toggle control
+- **Persistent Configuration** - Settings saved to `~/.docker_tui.json`
 
 ## Installation
 
-### PyPI Installation (Recommended)
+### Requirements
+- Python 3.8 or higher
+- Docker daemon running
+- Access to Docker socket (`/var/run/docker.sock`)
 
+### Install via pip (Recommended)
 ```bash
 pip install dtop
 ```
 
-### Alternative Installation Methods
-
-#### From GitHub (Latest)
+### Install from GitHub (Latest)
 ```bash
 pip install git+https://github.com/StakeSquid/dtop.git
 ```
 
-#### One-Line Install Script
+### Quick Install Script
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/StakeSquid/dtop/main/scripts/install.sh)"
 ```
 
-#### Development Installation
+### Development Installation
+```bash
+git clone https://github.com/StakeSquid/dtop
+cd dtop
+pip install -e .
+```
+
+## Quick Start
+
+```bash
+# Launch with modern Textual UI (default)
+dtop
+
+# Use legacy curses interface
+dtop --legacy
+
+# Enable debug mode
+dtop --debug
+
+# Force legacy mode via environment variable
+export DTOP_LEGACY=true
+dtop
+```
+
+## Keyboard Shortcuts
+
+### Main Interface
+
+#### Navigation
+| Key | Action |
+|-----|--------|
+| `↑/↓` | Select container |
+| `Enter` | Show actions menu |
+| `Tab` | Switch between UI elements |
+| `PageUp/PageDown` | Scroll container list |
+
+#### Container Actions
+| Key | Action |
+|-----|--------|
+| `L` | View logs |
+| `I` | Inspect container |
+| `Enter` | Actions menu |
+
+#### Filtering & Search
+| Key | Action |
+|-----|--------|
+| `\` | Focus filter input |
+| `Escape` | Clear filter |
+
+#### View Controls
+| Key | Action |
+|-----|--------|
+| `R` | Refresh |
+| `D` | Toggle dark/light theme |
+| `C` | Column settings |
+| `S` | Sort dialog |
+| `?` | Help |
+| `Q` | Quit |
+
+### Log View
+
+#### Navigation & Search
+| Key | Action |
+|-----|--------|
+| `/` | Search in logs |
+| `N` | Next match / Toggle normalization |
+| `Shift+N` | Previous match |
+| `\` | Filter logs |
+| `Escape` | Clear search/filter or exit |
+
+#### Display Controls
+| Key | Action |
+|-----|--------|
+| `W` | Toggle line wrap |
+| `F` | Toggle follow mode |
+| `T` | Set tail lines |
+| `Shift+T` | Toggle timestamps |
+| `C` | Clear logs |
+| `S` | Toggle case-sensitive search |
+
+#### Advanced Features
+| Key | Action |
+|-----|--------|
+| `R` | Time range filter |
+| `E` | Export logs |
+| `G` | Go to top |
+| `Shift+G` | Go to bottom |
+| `PageUp/PageDown` | Page up/down |
+
+### Container Actions Menu
+
+When you press Enter on a container, you can:
+- **View Logs** - Advanced log viewer with filtering
+- **Inspect** - Detailed container configuration
+- **Stop/Start** - Control container state
+- **Pause/Unpause** - Suspend container
+- **Restart** - Restart container
+- **Remove** - Delete container
+- **Recreate** - Remove and recreate from image
+
+## Log Filter Syntax
+
+The log viewer supports complex filter expressions:
+
+### Basic Filters
+- `error` - Show lines containing "error"
+- `+error` - Explicitly include lines with "error"
+- `-error` or `!error` - Exclude lines with "error"
+- `"exact phrase"` - Search for exact phrase
+
+### Complex Expressions
+- `error AND warning` - Lines with both terms
+- `error OR warning` - Lines with either term
+- `(error OR warning) AND -debug` - Combine with parentheses
+- `error -verbose +info` - Mixed include/exclude
+
+### Time Filtering
+Press `R` in log view to filter by timestamp range. Supports various formats:
+- `2024-01-01` - Date only
+- `2024-01-01 14:30:00` - Full timestamp
+- Leave empty for start/end of logs
+
+## Configuration
+
+Configuration is stored in `~/.docker_tui.json` and includes customizable column settings.
+
+### Column Configuration
+
+Each column supports:
+- `min_width` - Minimum width in characters
+- `max_width` - Maximum width (null for unlimited)
+- `weight` - Relative weight for width distribution
+- `align` - Text alignment (left/right)
+
+Example configuration:
+```json
+{
+  "columns": [
+    {
+      "name": "NAME",
+      "min_width": 15,
+      "max_width": null,
+      "weight": 3,
+      "align": "left"
+    },
+    {
+      "name": "CPU%",
+      "min_width": 7,
+      "max_width": 10,
+      "weight": 0,
+      "align": "right"
+    }
+  ]
+}
+```
+
+### Column Settings Dialog
+Press `C` in the main view to open the column settings dialog where you can:
+- Adjust minimum widths for each column
+- Set maximum width constraints
+- Changes are saved automatically
+
+### Responsive Sizing
+The table automatically adjusts to terminal width:
+- Columns expand based on their weight values
+- Respects min/max constraints
+- NAME and IMAGE columns prioritized for expansion
+
+## Project Structure
+
+```
+dtop/
+├── dtop/
+│   ├── __main__.py               # Package entry point
+│   ├── main.py                   # Application entry point
+│   ├── core/
+│   │   ├── docker_tui.py         # Legacy curses interface
+│   │   ├── textual_docker_tui.py # Modern Textual interface
+│   │   └── stats.py              # Statistics collection
+│   ├── views/
+│   │   ├── textual_log_view.py   # Advanced log viewer
+│   │   └── textual_inspect_view.py # Container inspector
+│   ├── utils/
+│   │   ├── config.py             # Configuration management
+│   │   ├── utils.py              # Utility functions
+│   │   └── normalize_logs.py     # Log normalization script
+│   └── actions/
+│       └── container_actions.py  # Container operations
+├── pyproject.toml                # Package configuration
+├── requirements.txt              # Dependencies
+└── scripts/
+    ├── install.sh                # Installation script
+    └── uninstall.sh              # Uninstallation script
+```
+
+## Performance
+
+dtop is optimized for efficiency:
+
+- **Parallel Stats Collection** - Uses ThreadPoolExecutor for concurrent stats gathering
+- **Smart Refresh** - Only updates changed data, throttles refresh to prevent overload
+- **Memory Management** - Automatic log rotation (25,000 line limit)
+- **Non-blocking UI** - Async operations keep UI responsive
+- **Efficient Rendering** - Textual framework handles optimal screen updates
+
+## Dependencies
+
+### Core Requirements
+- `docker>=6.0.0` - Docker SDK for Python
+- `textual>=0.47.0` - Modern TUI framework
+- `rich>=13.0.0` - Rich text formatting
+
+### Optional
+- `aiohttp>=3.8.0` - Enhanced async stats collection
+
+## Troubleshooting
+
+### Docker Connection Issues
+```bash
+# Check Docker daemon status
+sudo systemctl status docker
+
+# Verify socket permissions
+ls -la /var/run/docker.sock
+
+# Add user to docker group (logout/login required)
+sudo usermod -aG docker $USER
+```
+
+### Screen Restoration Issues
+If the terminal doesn't restore properly after exit:
+```bash
+reset
+```
+
+### Performance Issues
+- Use filter to reduce number of displayed containers
+- Disable auto-refresh when not actively monitoring
+- Close unnecessary log viewers
+
+### Legacy Interface
+If you experience issues with the Textual interface:
+```bash
+# Use the legacy curses interface
+dtop --legacy
+
+# Or set environment variable
+export DTOP_LEGACY=true
+```
+
+## Development
+
+### Building from Source
 ```bash
 # Clone repository
 git clone https://github.com/StakeSquid/dtop
@@ -63,250 +326,30 @@ cd dtop
 # Install in development mode
 pip install -e .
 
-# Or install dependencies manually
-pip install docker
-python -m dtop.main
-```
-
-## Quick Start
-
-After installation, simply run:
-```bash
-dtop
-```
-
-Make sure Docker is running and accessible to your user account.
-
-## Usage Guide
-
-### Main Interface Controls
-
-| Key | Action |
-|-----|--------|
-| ↑/↓ or Mouse | Navigate containers |
-| Enter or Click | Show container action menu |
-| L | View container logs |
-| I | Inspect container details |
-| Q | Quit application |
-| R | Refresh container list |
-| / | Search/filter containers |
-| C | Column settings (edit min/max widths) |
-
-### Container Actions
-
-When you select a container (Enter or Click), you can:
-
-- **📋 Logs**: View real-time and historical logs with advanced features
-- **🔍 Inspect**: View detailed container configuration and state
-- **▶️ Start/Stop**: Control container execution state
-- **⏸️ Pause/Unpause**: Temporarily suspend container processes
-- **🔄 Restart**: Restart the container
-- **🔨 Recreate**: Remove and recreate container from image
-- **💻 Exec Shell**: Open interactive shell session
-
-### Advanced Log Viewing
-
-#### Search and Navigation
-| Key | Action |
-|-----|--------|
-| / | Search in logs (literal search only) |
-| n/N | Next/previous search result |
-| \\ | Advanced filter mode |
-| ↑/↓, PgUp/PgDn | Scroll through logs |
-| Home/End | Jump to beginning/end |
-
-#### Log Controls
-| Key | Action |
-|-----|--------|
-| F | Toggle follow mode (real-time streaming) |
-| N | Toggle log normalization |
-| W | Toggle line wrapping |
-| R | Time range filter |
-| E | Export logs to file |
-| ESC | Clear filters/return to main |
-
-#### Filter Syntax
-
-The log viewer supports sophisticated filtering:
-
-**Basic Filters:**
-- `error` - Show lines containing "error"
-- `+error` - Include lines with "error" (explicit include)
-- `-warning` - Exclude lines with "warning"
-- `!debug` - Exclude lines with "debug" (alternative syntax)
-
-**Advanced Filters:**
-```bash
-error -debug                    # Lines with "error" but not "debug"
-+error +warning -verbose       # Lines with "error" OR "warning", but not "verbose"  
-"connection failed" -timeout   # Exact phrase matching with exclusion
-```
-
-**Filter Features:**
-- Multiple inclusion filters work as OR logic
-- Exclusion filters always take precedence
-- Use quotes for multi-word phrases
-- Press Tab to toggle case sensitivity
-- Supports complex boolean combinations
-
-#### Time-based Filtering
-
-Press `R` in log view to filter by time range:
-- Select start and end dates/times
-- Export filtered results
-- Combine with text filters
-- Navigate through time ranges
-
-#### Log Normalization
-
-Press `N` to toggle automatic log normalization:
-- Parses JSON logs into readable format
-- Standardizes timestamp formats
-- Extracts structured data fields
-- Maintains original raw logs option
-
-## Configuration
-
-dtop automatically saves your preferences to `~/.docker_tui.json`:
-
-```json
-{
-  "columns": {
-    "widths": [20, 15, 10, 8, 8, 12, 12, 15, 15],
-    "visible": ["NAME", "IMAGE", "STATUS", "CPU%", "MEM%", "NET I/O", "DISK I/O", "CREATED AT", "UPTIME"]
-  },
-  "log_settings": {
-    "normalize": true,
-    "wrap_lines": false,
-    "follow_mode": false
-  },
-  "ui_settings": {
-    "mouse_enabled": true,
-    "show_separators": true
-  }
-}
-```
-
-### Column Widths
-
-- The main containers table now scales to fill the terminal width using per-column `min_width`/`max_width` constraints.
-- Defaults prioritize expanding the `NAME` column (no `max_width` by default) and keep metrics compact.
-- Edit via the in-app menu (press `C`) or by updating `~/.docker_tui.json` entries under `columns` (each column supports `min_width`, `max_width` (null for unlimited), `weight`, `align`, `width`).
-- If the terminal is narrower than the sum of `min_width`s, the table remains horizontally scrollable.
-
-### Customization Options
-
-- **Column Resize**: Drag column separators with mouse
-- **Column Visibility**: Configure which metrics to display
-- **Performance Tuning**: Adjust refresh rates and collection intervals
-- **Color Themes**: Customize status and performance indicators
-
-## Architecture
-
-dtop is built with a modular architecture:
-
-```
-dtop/
-├── core/           # Core TUI engine and stats collection
-├── views/          # Log viewer and inspection interfaces  
-├── actions/        # Container operation handlers
-├── utils/          # Configuration, utilities, and log processing
-└── scripts/        # Installation and maintenance scripts
-```
-
-### Key Components
-
-- **Async Stats Collection**: Parallel collection using aiohttp for performance
-- **Real-time Log Streaming**: Efficient Docker API integration
-- **Responsive UI**: Curses-based interface with mouse support
-- **Extensible Actions**: Plugin-ready container operation system
-
-## Performance Features
-
-- **Parallel Processing**: Concurrent stats collection for multiple containers
-- **Efficient Caching**: Smart caching of container metadata and logs
-- **Memory Management**: Automatic garbage collection and resource cleanup
-- **Optimized Rendering**: Minimal screen updates and efficient drawing
-
-## Requirements
-
-- **Python**: 3.8 or higher
-- **Docker**: Docker daemon running and accessible
-- **Terminal**: Mouse support and color capability recommended
-- **Dependencies**: `docker>=6.0.0` (automatically installed)
-
-### Optional Dependencies
-
-- `aiohttp>=3.8.0` - For enhanced async performance (install with `pip install dtop[full]`)
-
-## Troubleshooting
-
-### Common Issues
-
-**Docker Connection Error:**
-```bash
-# Ensure Docker is running
-sudo systemctl start docker
-
-# Check Docker socket permissions
-sudo usermod -aG docker $USER
-# Then logout and login again
-```
-
-**Terminal Display Issues:**
-```bash
-# Reset terminal if display is corrupted
-reset
-
-# Ensure terminal supports colors and mouse
-echo $TERM
-```
-
-**Performance Issues:**
-- Reduce number of containers being monitored
-- Disable mouse support if experiencing lag
-- Adjust refresh intervals in configuration
-
-### Getting Help
-
-- **GitHub Issues**: [Report bugs and feature requests](https://github.com/StakeSquid/dtop/issues)
-- **Discussions**: [Community discussions and questions](https://github.com/StakeSquid/dtop/discussions)
-
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
-
-### Development Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/StakeSquid/dtop
-cd dtop
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install in development mode
-pip install -e .
-
-# Install development dependencies
-pip install -e .[dev]
-
 # Run tests
-python -m pytest tests/
+pytest tests/
+
+# Build distribution
+python -m build
 ```
+
+### Contributing
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Support
+
+For issues, questions, or feature requests:
+- Open an issue on [GitHub](https://github.com/StakeSquid/dtop/issues)
+- Check existing issues for solutions
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License - see LICENSE file for details.
 
-## Acknowledgments
+## Author
 
-- Built with Python's `curses` library for terminal UI
-- Uses the official Docker Python SDK
-- Inspired by htop and similar system monitoring tools
+StakeSquid
 
 ---
 
-**⭐ Star this repository if dtop helps you manage Docker containers more efficiently!**
+**Note**: dtop requires an active Docker daemon and appropriate permissions to access the Docker socket. Ensure Docker is running and your user has the necessary permissions before launching the application.
