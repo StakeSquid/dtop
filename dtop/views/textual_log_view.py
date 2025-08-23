@@ -643,23 +643,54 @@ class LogViewScreen(Screen):
     
     def normalize_logs(self, logs: List[str]) -> List[str]:
         """Normalize log lines using the normalize script."""
+        if not logs:
+            return logs
+            
         if not os.path.exists(self.normalize_script):
             return logs
         
+        # Make sure the script is executable
+        if not os.access(self.normalize_script, os.X_OK):
+            try:
+                os.chmod(self.normalize_script, 0o755)
+            except OSError:
+                return logs
+        
         try:
-            # Run normalization script
+            # Join log lines for input
+            log_text = '\n'.join(logs)
+            
+            # Run normalization script with Python explicitly
             process = subprocess.Popen(
-                [self.normalize_script],
+                ['python3', self.normalize_script],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
             )
             
-            output, _ = process.communicate(input='\n'.join(logs), timeout=5)
-            return output.strip().split('\n') if output else logs
-        except:
-            return logs  # Return original on error
+            # Send logs and get normalized output
+            stdout, stderr = process.communicate(input=log_text, timeout=3)
+            
+            # Check for errors
+            if process.returncode != 0 and stderr:
+                # Log error but return original logs
+                return logs
+            
+            # Split output into lines and return
+            if stdout:
+                normalized = stdout.splitlines()
+                # Filter out empty lines that weren't in original
+                return normalized if normalized else logs
+            else:
+                return logs
+                
+        except subprocess.TimeoutExpired:
+            # Handle timeout by returning original logs
+            return logs
+        except (subprocess.SubprocessError, OSError, Exception):
+            # Return original logs on any error
+            return logs
     
     def filter_logs(self, logs: List[str], filter_expr: str) -> List[str]:
         """Filter logs based on expression."""
