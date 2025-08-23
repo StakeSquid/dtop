@@ -566,15 +566,86 @@ class DockerTUIApp(App):
         """Update the data table with container info."""
         table = self.query_one("#container-table", DataTable)
         
-        # Remember current selection
-        current_row_key = None
+        # Helpers to work across Textual versions
+        def _get_row_key_value_at(idx: int):
+            try:
+                # Preferred API
+                key = table.get_row_key(idx)  # type: ignore[attr-defined]
+                return getattr(key, "value", key)
+            except Exception:
+                pass
+            try:
+                # Fallback: rows or row_keys collections
+                rows = getattr(table, "rows", None)
+                if rows is not None and 0 <= idx < len(rows):
+                    key = rows[idx]
+                    return getattr(key, "value", key)
+            except Exception:
+                pass
+            try:
+                row_keys = getattr(table, "row_keys", None)
+                if row_keys is not None and 0 <= idx < len(row_keys):
+                    key = row_keys[idx]
+                    return getattr(key, "value", key)
+            except Exception:
+                pass
+            return None
+        
+        def _set_cursor_to_key_value(key_value) -> bool:
+            try:
+                rows = getattr(table, "rows", None)
+                if rows is not None:
+                    for i, rk in enumerate(rows):
+                        if getattr(rk, "value", rk) == key_value:
+                            table.cursor_coordinate = Coordinate(i, 0)
+                            # Attempt to scroll to ensure visibility
+                            try:
+                                table.scroll_to_row(i)  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                            return True
+            except Exception:
+                pass
+            try:
+                row_keys = getattr(table, "row_keys", None)
+                if row_keys is not None:
+                    for i, rk in enumerate(row_keys):
+                        if getattr(rk, "value", rk) == key_value:
+                            table.cursor_coordinate = Coordinate(i, 0)
+                            try:
+                                table.scroll_to_row(i)  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                            return True
+            except Exception:
+                pass
+            # As a last resort iterate by index using get_row_key
+            try:
+                for i in range(getattr(table, "row_count", 0)):
+                    kv = _get_row_key_value_at(i)
+                    if kv == key_value:
+                        table.cursor_coordinate = Coordinate(i, 0)
+                        try:
+                            table.scroll_to_row(i)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        return True
+            except Exception:
+                pass
+            return False
+        
+        # Remember current selection (index and key)
         current_row_index = 0
+        current_key_value = None
         if table.cursor_coordinate:
             try:
                 current_row_index = table.cursor_coordinate.row
-                current_row_key = table.get_row_at(current_row_index)[0]
-            except:
-                pass
+            except Exception:
+                current_row_index = 0
+        try:
+            current_key_value = _get_row_key_value_at(current_row_index)
+        except Exception:
+            current_key_value = None
         
         # Clear and rebuild table
         table.clear()
@@ -584,22 +655,18 @@ class DockerTUIApp(App):
             table.add_row(*row_data, key=container.id)
         
         # Restore selection if possible
-        if current_row_key and table.row_count > 0:
-            # Try to find the same container
-            found = False
-            for i, row_key in enumerate(table.rows):
-                if row_key.value == current_row_key.value:
-                    table.cursor_coordinate = Coordinate(i, 0)
-                    found = True
-                    break
-            
-            # If not found, try to maintain position
-            if not found and table.row_count > 0:
+        if getattr(table, "row_count", 0) > 0:
+            restored = False
+            if current_key_value is not None:
+                restored = _set_cursor_to_key_value(current_key_value)
+            if not restored:
+                # Maintain relative position by index
                 new_index = min(current_row_index, table.row_count - 1)
                 table.cursor_coordinate = Coordinate(new_index, 0)
-        elif table.row_count > 0:
-            # Set cursor to first row if no previous selection
-            table.cursor_coordinate = Coordinate(0, 0)
+                try:
+                    table.scroll_to_row(new_index)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
     
     def build_row_data(self, container) -> List:
         """Build row data for a container."""
@@ -698,14 +765,38 @@ class DockerTUIApp(App):
         """Get currently selected container."""
         table = self.query_one("#container-table", DataTable)
         
-        # Try to get from cursor coordinate
+        # Try to get from cursor coordinate using robust key retrieval
         if table.cursor_coordinate and table.row_count > 0:
             try:
                 row_index = table.cursor_coordinate.row
                 if 0 <= row_index < table.row_count:
-                    row_key = table.get_row_at(row_index)[0]
-                    if row_key and row_key.value:
-                        return self.container_map.get(row_key.value)
+                    # Prefer API get_row_key if available
+                    try:
+                        key = table.get_row_key(row_index)  # type: ignore[attr-defined]
+                        key_value = getattr(key, "value", key)
+                        if key_value:
+                            return self.container_map.get(key_value)
+                    except Exception:
+                        pass
+                    # Fallback: rows / row_keys collections
+                    try:
+                        rows = getattr(table, "rows", None)
+                        if rows is not None:
+                            rk = rows[row_index]
+                            key_value = getattr(rk, "value", rk)
+                            if key_value:
+                                return self.container_map.get(key_value)
+                    except Exception:
+                        pass
+                    try:
+                        row_keys = getattr(table, "row_keys", None)
+                        if row_keys is not None:
+                            rk = row_keys[row_index]
+                            key_value = getattr(rk, "value", rk)
+                            if key_value:
+                                return self.container_map.get(key_value)
+                    except Exception:
+                        pass
             except Exception as e:
                 self.log.debug(f"Error getting selected container: {e}")
         
