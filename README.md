@@ -90,6 +90,7 @@ Make sure Docker is running and accessible to your user account.
 | Q | Quit application |
 | R | Refresh container list |
 | / | Search/filter containers |
+| C | Column settings (edit min/max widths) |
 
 ### Container Actions
 
@@ -185,6 +186,13 @@ dtop automatically saves your preferences to `~/.docker_tui.json`:
   }
 }
 ```
+
+### Column Widths
+
+- The main containers table now scales to fill the terminal width using per-column `min_width`/`max_width` constraints.
+- Defaults prioritize expanding the `NAME` column (no `max_width` by default) and keep metrics compact.
+- Edit via the in-app menu (press `C`) or by updating `~/.docker_tui.json` entries under `columns` (each column supports `min_width`, `max_width` (null for unlimited), `weight`, `align`, `width`).
+- If the terminal is narrower than the sum of `min_width`s, the table remains horizontally scrollable.
 
 ### Customization Options
 

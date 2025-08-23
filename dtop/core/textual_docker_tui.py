@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from textual import on, work
+from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
 from textual.widgets import DataTable, Footer, Header, Input, Label, Static, Button, Switch
@@ -244,6 +245,7 @@ class DockerTUIApp(App):
         Binding("s", "sort_dialog", "Sort"),
         Binding("?", "help", "Help"),
         Binding("d", "toggle_dark", "Theme"),
+        Binding("c", "column_settings", "Columns"),
     ]
     
     # Reactive properties
@@ -270,6 +272,99 @@ class DockerTUIApp(App):
         self.sort_reverse = False
         self.selected_container_id = None
         self.last_refresh = 0
+
+    # -----------------------------
+    # Column width management
+    # -----------------------------
+
+    def _usable_table_width(self) -> int:
+        """Compute usable character width for the table based on app size.
+
+        Adds a small safety margin for borders/scrollbars.
+        """
+        total = max(0, int(self.size.width))
+        return max(0, total - 2)
+
+    def _compute_column_widths(self) -> List[int]:
+        """Compute target widths for all columns to fit the available width.
+
+        - Start with min_width
+        - Distribute extra width by column weight
+        - Respect max_width when present
+        """
+        cols = self.columns
+        if not cols:
+            return []
+
+        usable = self._usable_table_width()
+        min_widths = [int(c.get('min_width', c.get('width', 10)) or 0) for c in cols]
+        max_widths: List[Optional[int]] = [
+            (int(c['max_width']) if c.get('max_width') is not None else None) for c in cols
+        ]
+        weights = [int(c.get('weight', 0) or 0) for c in cols]
+
+        widths = min_widths[:]
+        current = sum(widths)
+        if usable <= current:
+            return widths
+
+        extra = usable - current
+
+        # Iteratively distribute extra respecting caps
+        for _ in range(3):
+            expandable = []
+            total_weight = 0
+            for i, w in enumerate(weights):
+                if w <= 0:
+                    continue
+                mx = max_widths[i]
+                remaining_cap = (mx - widths[i]) if (mx is not None) else extra
+                if remaining_cap > 0:
+                    expandable.append(i)
+                    total_weight += max(1, w)
+
+            if not expandable or total_weight == 0 or extra <= 0:
+                break
+
+            allocated_total = 0
+            for i in expandable:
+                share = max(1, weights[i]) / total_weight
+                alloc = int(extra * share)
+                if alloc == 0 and (extra - allocated_total) > 0:
+                    alloc = 1
+                if max_widths[i] is not None:
+                    alloc = min(alloc, max(0, max_widths[i] - widths[i]))
+                widths[i] += max(0, alloc)
+                allocated_total += max(0, alloc)
+
+            if allocated_total == 0:
+                break
+            extra -= allocated_total
+
+        # If extra remains and some columns have no max, distribute round-robin by weight
+        if extra > 0:
+            no_max = [i for i, mx in enumerate(max_widths) if mx is None and weights[i] > 0]
+            no_max.sort(key=lambda i: (-weights[i], i))
+            idx = 0
+            while extra > 0 and no_max:
+                widths[no_max[idx % len(no_max)]] += 1
+                extra -= 1
+                idx += 1
+
+        return widths
+
+    def _apply_column_widths(self) -> None:
+        """Apply computed widths to the DataTable columns."""
+        table = self.query_one("#container-table", DataTable)
+        widths = self._compute_column_widths()
+        for i, w in enumerate(widths):
+            try:
+                table.set_column_width(i, int(w))  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    table.set_column_width(f"col_{i}", int(w))  # type: ignore[attr-defined]
+                except Exception:
+                    pass
     
     def compose(self) -> ComposeResult:
         """Create the main UI."""
@@ -297,7 +392,15 @@ class DockerTUIApp(App):
         
         # Focus the table for keyboard navigation
         table = self.query_one("#container-table", DataTable)
+        self._apply_column_widths()
         table.focus()
+
+    def on_resize(self, event: events.Resize) -> None:  # type: ignore[override]
+        """Recompute and apply column widths on terminal resize."""
+        try:
+            self._apply_column_widths()
+        except Exception:
+            pass
     
     async def connect_docker(self) -> None:
         """Connect to Docker daemon."""
@@ -321,7 +424,7 @@ class DockerTUIApp(App):
             table.add_column(
                 col['name'],
                 key=f"col_{i}",
-                width=col.get('min_width', 20)
+                width=col.get('width', col.get('min_width', 20))
             )
     
     async def start_refresh_timers(self) -> None:
@@ -761,6 +864,55 @@ class DockerTUIApp(App):
         Q - Quit
         """
         self.notify(help_text, title="Help", timeout=10)
+
+    # -----------------------------
+    # Column settings UI
+    # -----------------------------
+
+    def action_column_settings(self) -> None:
+        """Open a simple modal to edit per-column min/max widths."""
+        self.push_screen(ColumnSettingsModal(self.columns), self._handle_column_settings_result)
+
+    def _handle_column_settings_result(self, result: Optional[List[Dict[str, Any]]]) -> None:
+        """Handle updated columns from settings modal."""
+        if not result:
+            return
+        cleaned = []
+        for old, new in zip(self.columns, result):
+            try:
+                min_w = max(1, int(new.get('min_width', old.get('min_width', 1))))
+                max_w_val = new.get('max_width', old.get('max_width'))
+                max_w = int(max_w_val) if (max_w_val not in (None, "",)) else None
+                width = max(min_w, int(old.get('width', min_w)))
+                if max_w is not None:
+                    width = min(width, max_w)
+                cleaned.append({
+                    **old,
+                    'min_width': min_w,
+                    'max_width': max_w,
+                    'width': width,
+                })
+            except Exception:
+                cleaned.append(old)
+
+        self.columns = cleaned
+        try:
+            save_config(self.columns)
+        except Exception:
+            pass
+        # Recreate columns to ensure keys + widths, then repopulate
+        try:
+            table = self.query_one("#container-table", DataTable)
+            current = table.cursor_coordinate
+            table.clear(columns=True)
+            for i, col in enumerate(self.columns):
+                table.add_column(col['name'], key=f"col_{i}", width=col.get('width', col.get('min_width', 20)))
+            asyncio.create_task(self.update_table())
+            self._apply_column_widths()
+            if current:
+                table.cursor_coordinate = current
+        except Exception:
+            pass
     
     async def on_unmount(self) -> None:
         """Cleanup when app closes."""
@@ -769,6 +921,72 @@ class DockerTUIApp(App):
         if self.stats_timer:
             self.stats_timer.stop()
         self.executor.shutdown(wait=False)
+
+
+class ColumnSettingsModal(ModalScreen[Optional[List[Dict[str, Any]]]]):
+    """Modal dialog to edit column min/max widths."""
+
+    CSS = """
+    ColumnSettingsModal { align: center middle; }
+    #columns-dialog { width: 60; height: auto; max-height: 80%; padding: 1 2; background: $surface; border: thick $primary; }
+    #columns-title { text-align: center; text-style: bold; color: $primary; margin: 0 0 1 0; }
+    .row { layout: horizontal; height: auto; margin: 0 0 1 0; }
+    .name { width: 20; }
+    .field { width: 10; margin-left: 1; }
+    .actions { layout: horizontal; margin-top: 1; }
+    .action-button { width: 1fr; margin: 0 1 0 0; }
+    #columns-list { height: 1fr; }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, columns: List[Dict[str, Any]]):
+        super().__init__()
+        self._columns = [c.copy() for c in columns]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="columns-dialog"):
+            yield Label("Column Settings", id="columns-title")
+            with ScrollableContainer(id="columns-list"):
+                for i, col in enumerate(self._columns):
+                    with Horizontal(classes="row"):
+                        yield Label(col['name'], classes="name")
+                        min_value = str(col.get('min_width', col.get('width', 10)))
+                        max_val = col.get('max_width')
+                        max_value = "" if max_val is None else str(max_val)
+                        yield Label("min:")
+                        yield Input(value=min_value, id=f"min_{i}", classes="field")
+                        yield Label("max:")
+                        yield Input(value=max_value, id=f"max_{i}", placeholder="none", classes="field")
+            with Horizontal(classes="actions"):
+                yield Button("Save", id="save", classes="action-button", variant="primary")
+                yield Button("Cancel", id="cancel", classes="action-button")
+
+    @on(Button.Pressed)
+    def handle_button(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "save":
+            result: List[Dict[str, Any]] = []
+            for i, col in enumerate(self._columns):
+                try:
+                    min_input = self.query_one(f"#min_{i}", Input).value.strip()
+                    max_input = self.query_one(f"#max_{i}", Input).value.strip()
+                    min_w = max(1, int(min_input)) if min_input else max(1, int(col.get('min_width', 1)))
+                    max_w = int(max_input) if max_input else None
+                    if max_w is not None and max_w < min_w:
+                        max_w = min_w
+                    result.append({
+                        **col,
+                        'min_width': min_w,
+                        'max_width': max_w,
+                    })
+                except Exception:
+                    result.append(col)
+            self.dismiss(result)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 def run():
