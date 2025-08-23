@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Docker TUI - High-Performance Async Stats Module for Textual
--------------------------------------------------------------
-Optimized for handling dozens of containers with sub-second updates.
-Uses streaming API and parallel processing for maximum performance.
+Docker TUI - Reliable Async Stats Module for Textual
+-----------------------------------------------------
+High-performance stats collection with automatic recovery and reconnection.
+Optimized for long-running stability with dozens of containers.
 """
 import asyncio
 import aiohttp
 import time
 import json
 import logging
-from typing import Dict, List, Optional, Any, Tuple, Set
+from typing import Dict, List, Optional, Any, Set
 from dataclasses import dataclass, field
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from enum import Enum
 
@@ -23,14 +22,18 @@ logger = logging.getLogger(__name__)
 DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 BASE_URL = "http://localhost"
 
-# Performance tuning parameters optimized for speed
-MAX_CONCURRENT_STREAMS = 50  # High concurrency for many containers
+# Performance and reliability parameters
+MAX_CONCURRENT_REQUESTS = 30  # Balance between speed and stability
 STATS_UPDATE_INTERVAL = 1.0  # Update every second
-STREAM_READ_TIMEOUT = 0.5  # Quick timeout for streaming reads
-CONNECTION_TIMEOUT = 2.0  # Overall connection timeout
+HEALTH_CHECK_INTERVAL = 5.0  # Check stream health every 5 seconds
+STREAM_REFRESH_INTERVAL = 60.0  # Refresh streams every minute to prevent staleness
+CONNECTION_TIMEOUT = 3.0  # Overall connection timeout
+READ_TIMEOUT = 2.0  # Read timeout for individual requests
 CLEANUP_INTERVAL = 60.0  # Cleanup old data every minute
 STALE_DATA_THRESHOLD = 300.0  # Remove data older than 5 minutes
-MAX_CONNECTION_POOL = 100  # Large connection pool for parallel requests
+MAX_CONNECTION_POOL = 50  # Connection pool size
+RECONNECT_DELAY = 1.0  # Delay before reconnecting failed stream
+MAX_RECONNECT_ATTEMPTS = 3  # Max reconnection attempts before falling back
 
 
 class ConnectionState(Enum):
@@ -57,12 +60,23 @@ class ContainerStats:
     block_read_rate: float = 0.0
     block_write_rate: float = 0.0
     timestamp: float = field(default_factory=time.time)
-    error_count: int = 0
-    last_error: Optional[str] = None
+    last_update: float = field(default_factory=time.time)
+    is_stale: bool = False
 
 
-class FastStatsCollector:
-    """Ultra-fast async stats collector using parallel streaming."""
+@dataclass
+class StreamInfo:
+    """Information about an active stream."""
+    container_id: str
+    task: Optional[asyncio.Task] = None
+    start_time: float = field(default_factory=time.time)
+    last_data_time: float = field(default_factory=time.time)
+    reconnect_count: int = 0
+    is_healthy: bool = True
+
+
+class ReliableStatsCollector:
+    """Reliable async stats collector with automatic recovery."""
     
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
@@ -71,14 +85,17 @@ class FastStatsCollector:
         self.previous_stats: Dict[str, Dict[str, Any]] = {}
         self.connection_state = ConnectionState.DISCONNECTED
         self.last_cleanup = time.time()
-        self.active_streams: Dict[str, asyncio.Task] = {}
-        self.stream_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.last_health_check = time.time()
+        self.active_streams: Dict[str, StreamInfo] = {}
+        self.monitored_containers: Set[str] = set()
+        self.fallback_mode = False
+        self.health_check_task: Optional[asyncio.Task] = None
         
     @asynccontextmanager
     async def connect(self):
-        """Context manager for aiohttp session with optimized settings."""
+        """Context manager for aiohttp session."""
         try:
-            # Create Unix socket connector with large connection pool
+            # Create Unix socket connector
             self.connector = aiohttp.UnixConnector(
                 path=DOCKER_SOCKET_PATH,
                 limit=MAX_CONNECTION_POOL,
@@ -87,22 +104,25 @@ class FastStatsCollector:
                 keepalive_timeout=30
             )
             
-            # Short timeout for fast failure detection
+            # Configure timeouts
             timeout = aiohttp.ClientTimeout(
                 total=CONNECTION_TIMEOUT,
-                connect=0.5,
-                sock_read=STREAM_READ_TIMEOUT
+                connect=1.0,
+                sock_read=READ_TIMEOUT
             )
             
-            # Create session with optimized settings
+            # Create session
             self.session = aiohttp.ClientSession(
                 connector=self.connector,
                 timeout=timeout,
-                json_serialize=json.dumps,
-                read_bufsize=65536  # Larger buffer for faster reads
+                json_serialize=json.dumps
             )
             
             self.connection_state = ConnectionState.CONNECTED
+            
+            # Start health check task
+            self.health_check_task = asyncio.create_task(self._health_check_loop())
+            
             logger.info("Connected to Docker daemon")
             
             yield self
@@ -112,13 +132,24 @@ class FastStatsCollector:
     
     async def close(self):
         """Close all connections and cleanup."""
+        # Cancel health check
+        if self.health_check_task:
+            self.health_check_task.cancel()
+            try:
+                await self.health_check_task
+            except asyncio.CancelledError:
+                pass
+        
         # Cancel all active streams
-        for task in self.active_streams.values():
-            task.cancel()
+        for stream_info in self.active_streams.values():
+            if stream_info.task:
+                stream_info.task.cancel()
         
         # Wait for cancellations
-        if self.active_streams:
-            await asyncio.gather(*self.active_streams.values(), return_exceptions=True)
+        tasks = [s.task for s in self.active_streams.values() if s.task]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        
         self.active_streams.clear()
         
         # Close session
@@ -133,146 +164,308 @@ class FastStatsCollector:
         self.connection_state = ConnectionState.DISCONNECTED
         logger.info("Disconnected from Docker daemon")
     
-    async def collect_all_stats_fast(self, container_ids: List[str]) -> Dict[str, ContainerStats]:
+    async def collect_stats(self, container_ids: List[str]) -> Dict[str, ContainerStats]:
         """
-        Collect stats for all containers in parallel using streaming API.
-        This is the fastest method for many containers.
+        Main entry point for stats collection.
+        Manages streams and returns cached stats.
         """
         if not self.session:
             return {}
         
-        # Cleanup old data periodically
-        await self._cleanup_old_data()
+        # Update monitored containers
+        self.monitored_containers = set(container_ids)
         
+        # Start/stop streams as needed
+        await self._manage_streams()
+        
+        # Perform periodic maintenance
+        await self._periodic_maintenance()
+        
+        # Return current stats
+        return self._get_current_stats(container_ids)
+    
+    async def _manage_streams(self):
+        """Start and stop streams based on monitored containers."""
         # Start streams for new containers
-        new_containers = set(container_ids) - set(self.active_streams.keys())
-        for cid in new_containers:
+        for cid in self.monitored_containers:
             if cid not in self.active_streams:
-                task = asyncio.create_task(self._stream_container_stats(cid))
-                self.active_streams[cid] = task
+                await self._start_stream(cid)
         
         # Stop streams for removed containers
-        removed_containers = set(self.active_streams.keys()) - set(container_ids)
-        for cid in removed_containers:
-            if cid in self.active_streams:
-                self.active_streams[cid].cancel()
-                del self.active_streams[cid]
+        to_remove = []
+        for cid, stream_info in self.active_streams.items():
+            if cid not in self.monitored_containers:
+                if stream_info.task:
+                    stream_info.task.cancel()
+                to_remove.append(cid)
         
-        # Return current cache
-        return {cid: self.stats_cache[cid] for cid in container_ids if cid in self.stats_cache}
+        for cid in to_remove:
+            del self.active_streams[cid]
     
-    async def collect_stats_oneshot(self, container_ids: List[str]) -> Dict[str, ContainerStats]:
-        """
-        Collect stats using parallel one-shot requests.
-        Faster than sequential but slower than streaming.
-        """
-        if not self.session:
-            return {}
+    async def _start_stream(self, container_id: str):
+        """Start a stats stream for a container."""
+        stream_info = StreamInfo(container_id=container_id)
         
-        # Create tasks for all containers
-        tasks = []
-        for cid in container_ids:
-            task = asyncio.create_task(self._fetch_stats_oneshot(cid))
-            tasks.append((cid, task))
+        if self.fallback_mode:
+            # Use polling in fallback mode
+            stream_info.task = asyncio.create_task(
+                self._poll_container_stats(container_id)
+            )
+        else:
+            # Use streaming normally
+            stream_info.task = asyncio.create_task(
+                self._stream_container_stats(container_id)
+            )
         
-        # Wait for all tasks to complete
-        results = {}
-        for cid, task in tasks:
-            try:
-                stats_data = await task
-                if stats_data:
-                    stats = self._parse_stats(cid, stats_data)
-                    results[cid] = stats
-                    self.stats_cache[cid] = stats
-            except Exception as e:
-                logger.debug(f"Failed to get stats for {cid[:12]}: {e}")
-        
-        return results
+        self.active_streams[container_id] = stream_info
     
     async def _stream_container_stats(self, container_id: str):
         """
-        Stream stats for a single container.
-        Reads one stat per second from the streaming endpoint.
+        Stream stats for a single container with automatic reconnection.
         """
+        stream_info = self.active_streams.get(container_id)
+        if not stream_info:
+            return
+        
+        while container_id in self.monitored_containers:
+            try:
+                await self._stream_stats_once(container_id)
+                
+                # If stream ended normally, wait before reconnecting
+                if container_id in self.monitored_containers:
+                    await asyncio.sleep(RECONNECT_DELAY)
+                    stream_info.reconnect_count += 1
+                    
+                    # Switch to polling if too many reconnects
+                    if stream_info.reconnect_count > MAX_RECONNECT_ATTEMPTS:
+                        logger.debug(f"Switching to polling for {container_id[:12]}")
+                        await self._poll_container_stats(container_id)
+                        return
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Stream error for {container_id[:12]}: {e}")
+                await asyncio.sleep(RECONNECT_DELAY)
+    
+    async def _stream_stats_once(self, container_id: str):
+        """Single streaming session for a container."""
         if not self.session:
             return
         
         url = f"{BASE_URL}/containers/{container_id}/stats?stream=true"
+        stream_info = self.active_streams.get(container_id)
         
         try:
-            async with self.session.get(url) as response:
+            # Use longer timeout for streaming
+            timeout = aiohttp.ClientTimeout(total=None, sock_read=10.0)
+            
+            async with self.session.get(url, timeout=timeout) as response:
                 if response.status != 200:
                     return
                 
                 # Read streaming stats
                 async for line in response.content:
-                    if not line:
-                        continue
+                    if not line or container_id not in self.monitored_containers:
+                        break
                     
                     try:
-                        # Parse JSON stats
                         stats_data = json.loads(line)
                         stats = self._parse_stats(container_id, stats_data)
                         
                         # Update cache
                         self.stats_cache[container_id] = stats
                         
-                        # Small delay to prevent CPU spinning
+                        # Update stream health
+                        if stream_info:
+                            stream_info.last_data_time = time.time()
+                            stream_info.is_healthy = True
+                            stream_info.reconnect_count = 0  # Reset on success
+                        
+                        # Small delay between reads
                         await asyncio.sleep(0.1)
                         
                     except json.JSONDecodeError:
                         continue
                     except asyncio.CancelledError:
-                        break
+                        raise
                     except Exception as e:
-                        logger.debug(f"Error parsing stats for {container_id[:12]}: {e}")
+                        logger.debug(f"Error parsing stats: {e}")
                         
         except asyncio.CancelledError:
-            pass
+            raise
+        except asyncio.TimeoutError:
+            logger.debug(f"Stream timeout for {container_id[:12]}")
         except Exception as e:
             logger.debug(f"Stream error for {container_id[:12]}: {e}")
-        finally:
-            # Remove from active streams
-            self.active_streams.pop(container_id, None)
     
-    async def _fetch_stats_oneshot(self, container_id: str) -> Optional[Dict[str, Any]]:
+    async def _poll_container_stats(self, container_id: str):
         """
-        Fetch stats using one-shot API (faster than stream=false).
-        Uses very short timeout to fail fast.
+        Poll stats for a container (fallback mode).
+        More reliable but slightly less efficient than streaming.
         """
+        while container_id in self.monitored_containers:
+            try:
+                stats_data = await self._fetch_stats_once(container_id)
+                if stats_data:
+                    stats = self._parse_stats(container_id, stats_data)
+                    self.stats_cache[container_id] = stats
+                    
+                    # Update stream health
+                    stream_info = self.active_streams.get(container_id)
+                    if stream_info:
+                        stream_info.last_data_time = time.time()
+                        stream_info.is_healthy = True
+                
+                await asyncio.sleep(STATS_UPDATE_INTERVAL)
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Polling error for {container_id[:12]}: {e}")
+                await asyncio.sleep(STATS_UPDATE_INTERVAL)
+    
+    async def _fetch_stats_once(self, container_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch stats once using the streaming endpoint."""
         if not self.session:
             return None
         
-        # Use streaming endpoint but read only first response
         url = f"{BASE_URL}/containers/{container_id}/stats?stream=true"
         
         try:
-            # Use even shorter timeout for one-shot requests
-            timeout = aiohttp.ClientTimeout(total=1.0, sock_read=0.5)
+            # Short timeout for one-shot requests
+            timeout = aiohttp.ClientTimeout(total=2.0, sock_read=1.0)
             
             async with self.session.get(url, timeout=timeout) as response:
                 if response.status != 200:
                     return None
                 
-                # Read only first line of streaming response
+                # Read first line only
                 async for line in response.content:
                     if line:
                         try:
                             return json.loads(line)
                         except json.JSONDecodeError:
                             pass
-                    break  # Only read first line
+                    break
                     
-        except asyncio.TimeoutError:
-            logger.debug(f"Timeout getting stats for {container_id[:12]}")
         except Exception as e:
-            logger.debug(f"Error getting stats for {container_id[:12]}: {e}")
+            logger.debug(f"Failed to fetch stats for {container_id[:12]}: {e}")
         
         return None
     
+    async def _health_check_loop(self):
+        """Periodic health check for all streams."""
+        while True:
+            try:
+                await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+                await self._check_stream_health()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Health check error: {e}")
+    
+    async def _check_stream_health(self):
+        """Check health of all active streams and restart if needed."""
+        current_time = time.time()
+        stale_threshold = HEALTH_CHECK_INTERVAL * 2
+        
+        for cid, stream_info in list(self.active_streams.items()):
+            if cid not in self.monitored_containers:
+                continue
+            
+            # Check if stream is stale
+            if current_time - stream_info.last_data_time > stale_threshold:
+                logger.debug(f"Stream stale for {cid[:12]}, restarting...")
+                stream_info.is_healthy = False
+                
+                # Cancel old task
+                if stream_info.task:
+                    stream_info.task.cancel()
+                
+                # Restart stream
+                await self._start_stream(cid)
+            
+            # Check if task is still running
+            elif stream_info.task and stream_info.task.done():
+                # Task ended unexpectedly, restart
+                logger.debug(f"Stream task ended for {cid[:12]}, restarting...")
+                await self._start_stream(cid)
+    
+    async def _periodic_maintenance(self):
+        """Perform periodic cleanup and maintenance."""
+        current_time = time.time()
+        
+        # Cleanup old data
+        if current_time - self.last_cleanup > CLEANUP_INTERVAL:
+            await self._cleanup_old_data()
+            self.last_cleanup = current_time
+        
+        # Periodic stream refresh to prevent long-lived connection issues
+        if current_time - self.last_health_check > STREAM_REFRESH_INTERVAL:
+            await self._refresh_old_streams()
+            self.last_health_check = current_time
+    
+    async def _refresh_old_streams(self):
+        """Refresh streams that have been running for too long."""
+        current_time = time.time()
+        
+        for cid, stream_info in list(self.active_streams.items()):
+            if cid not in self.monitored_containers:
+                continue
+            
+            # Refresh streams older than the refresh interval
+            if current_time - stream_info.start_time > STREAM_REFRESH_INTERVAL:
+                logger.debug(f"Refreshing stream for {cid[:12]}")
+                
+                # Cancel old task
+                if stream_info.task:
+                    stream_info.task.cancel()
+                
+                # Start new stream
+                await self._start_stream(cid)
+    
+    async def _cleanup_old_data(self):
+        """Remove old data to prevent memory growth."""
+        current_time = time.time()
+        cutoff_time = current_time - STALE_DATA_THRESHOLD
+        
+        # Find stale containers
+        stale_containers = []
+        for cid, stats in self.stats_cache.items():
+            if stats.last_update < cutoff_time:
+                stale_containers.append(cid)
+        
+        # Clean up stale data
+        for cid in stale_containers:
+            self.stats_cache.pop(cid, None)
+            self.previous_stats.pop(cid, None)
+        
+        if stale_containers:
+            logger.debug(f"Cleaned up {len(stale_containers)} stale containers")
+    
+    def _get_current_stats(self, container_ids: List[str]) -> Dict[str, ContainerStats]:
+        """Get current stats for specified containers."""
+        current_time = time.time()
+        result = {}
+        
+        for cid in container_ids:
+            if cid in self.stats_cache:
+                stats = self.stats_cache[cid]
+                # Mark as stale if too old
+                stats.is_stale = (current_time - stats.last_update) > 5.0
+                result[cid] = stats
+        
+        return result
+    
     def _parse_stats(self, container_id: str, stats_data: Dict[str, Any]) -> ContainerStats:
         """Parse raw Docker stats into ContainerStats object."""
-        stats = ContainerStats(container_id=container_id)
+        current_time = time.time()
+        stats = ContainerStats(
+            container_id=container_id,
+            timestamp=current_time,
+            last_update=current_time
+        )
         
         # Parse CPU
         stats.cpu_percent = self._calculate_cpu_percent(stats_data)
@@ -312,11 +505,11 @@ class FastStatsCollector:
             elif op == "write":
                 stats.block_write_bytes += value
         
-        # Calculate rates if we have previous data
+        # Calculate rates
         prev = self.previous_stats.get(container_id)
         if prev:
-            time_delta = stats.timestamp - prev.get("timestamp", stats.timestamp)
-            if time_delta > 0:
+            time_delta = current_time - prev.get("timestamp", current_time)
+            if time_delta > 0.5:  # Need at least 0.5s for accurate rates
                 # Network rates
                 prev_rx = prev.get("rx_bytes", 0)
                 prev_tx = prev.get("tx_bytes", 0)
@@ -333,9 +526,9 @@ class FastStatsCollector:
                 if stats.block_write_bytes >= prev_write:
                     stats.block_write_rate = (stats.block_write_bytes - prev_write) / time_delta
         
-        # Store current values for next calculation
+        # Store for next calculation
         self.previous_stats[container_id] = {
-            "timestamp": stats.timestamp,
+            "timestamp": current_time,
             "rx_bytes": stats.network_rx_bytes,
             "tx_bytes": stats.network_tx_bytes,
             "read_bytes": stats.block_read_bytes,
@@ -376,47 +569,17 @@ class FastStatsCollector:
             pass
         
         return 0.0
-    
-    async def _cleanup_old_data(self):
-        """Remove old data to prevent memory growth."""
-        current_time = time.time()
-        
-        if current_time - self.last_cleanup < CLEANUP_INTERVAL:
-            return
-        
-        self.last_cleanup = current_time
-        cutoff_time = current_time - STALE_DATA_THRESHOLD
-        
-        # Find stale containers
-        stale_containers = []
-        for cid, stats in self.stats_cache.items():
-            if stats.timestamp < cutoff_time:
-                stale_containers.append(cid)
-        
-        # Clean up stale data
-        for cid in stale_containers:
-            self.stats_cache.pop(cid, None)
-            self.previous_stats.pop(cid, None)
-            
-            # Cancel stream if active
-            if cid in self.active_streams:
-                self.active_streams[cid].cancel()
-                del self.active_streams[cid]
-        
-        if stale_containers:
-            logger.debug(f"Cleaned up {len(stale_containers)} stale containers")
 
 
 class StatsManager:
     """Manager for coordinating stats collection in Textual app."""
     
     def __init__(self):
-        self.collector: Optional[FastStatsCollector] = None
+        self.collector: Optional[ReliableStatsCollector] = None
         self.collection_task: Optional[asyncio.Task] = None
         self.running = False
         self.container_ids: List[str] = []
         self.update_callback: Optional[callable] = None
-        self.use_streaming = True  # Use streaming for best performance
         
     async def start(self, update_callback: callable = None):
         """Start stats collection."""
@@ -424,7 +587,7 @@ class StatsManager:
             return
         
         self.update_callback = update_callback
-        self.collector = FastStatsCollector()
+        self.collector = ReliableStatsCollector()
         self.running = True
         
         # Start collection task
@@ -450,37 +613,25 @@ class StatsManager:
         logger.info("Stats collection stopped")
     
     async def _collection_loop(self):
-        """Main collection loop with optimized performance."""
+        """Main collection loop."""
         async with self.collector.connect():
-            # Initial fast collection using one-shot
-            if self.container_ids:
-                initial_stats = await self.collector.collect_stats_oneshot(self.container_ids)
-                if self.update_callback and initial_stats:
-                    await self.update_callback(initial_stats)
-            
             while self.running:
                 try:
                     if self.container_ids:
-                        if self.use_streaming:
-                            # Use streaming for continuous updates (most efficient)
-                            stats = await self.collector.collect_all_stats_fast(self.container_ids)
-                        else:
-                            # Use parallel one-shot requests (fallback)
-                            stats = await self.collector.collect_stats_oneshot(self.container_ids)
+                        # Collect stats
+                        stats = await self.collector.collect_stats(self.container_ids)
                         
-                        # Notify callback if set
+                        # Notify callback
                         if self.update_callback and stats:
                             await self.update_callback(stats)
                     
-                    # Short sleep for responsive updates
+                    # Wait for next update
                     await asyncio.sleep(STATS_UPDATE_INTERVAL)
                     
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
                     logger.error(f"Stats collection error: {e}")
-                    # Try switching methods on error
-                    self.use_streaming = not self.use_streaming
                     await asyncio.sleep(STATS_UPDATE_INTERVAL)
     
     def update_containers(self, container_ids: List[str]):
@@ -517,7 +668,8 @@ class StatsManager:
                 'block_write': stats.block_write_bytes,
                 'block_read_rate': stats.block_read_rate,
                 'block_write_rate': stats.block_write_rate,
-                'time': stats.timestamp
+                'time': stats.timestamp,
+                'is_stale': stats.is_stale
             }
         return None
     
@@ -541,7 +693,8 @@ class StatsManager:
                 'block_write': stats.block_write_bytes,
                 'block_read_rate': stats.block_read_rate,
                 'block_write_rate': stats.block_write_rate,
-                'time': stats.timestamp
+                'time': stats.timestamp,
+                'is_stale': stats.is_stale
             }
         
         return result
