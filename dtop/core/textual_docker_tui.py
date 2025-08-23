@@ -10,8 +10,6 @@ import docker
 import json
 import time
 from typing import Optional, List, Dict, Any, Tuple
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from textual import on, work
@@ -31,7 +29,7 @@ from ..utils.utils import format_bytes, format_datetime, format_timedelta
 from ..utils.config import load_config, save_config
 from ..views.textual_log_view import LogViewScreen
 from ..views.textual_inspect_view import InspectViewScreen
-from .stats import schedule_stats_collection_sync
+from .textual_stats import StatsManager
 
 
 @dataclass
@@ -283,12 +281,10 @@ class DockerTUIApp(App):
         self.containers = []
         self.filtered_containers = []
         self.container_map = {}
-        self.stats_cache = defaultdict(dict)
-        self.stats_lock = asyncio.Lock()
-        self.executor = ThreadPoolExecutor(max_workers=30)
+        self.stats_manager = StatsManager()
+        self.stats_cache = {}
         self.columns = load_config()
         self.refresh_timer = None
-        self.stats_timer = None
         # Default sort by NAME column if present
         try:
             name_index = next((i for i, c in enumerate(self.columns) if c.get('name') == 'NAME'), 0)
@@ -414,6 +410,7 @@ class DockerTUIApp(App):
         """Initialize when app is mounted."""
         await self.connect_docker()
         await self.setup_table()
+        await self.start_stats_collection()
         await self.start_refresh_timers()
         
         # Focus the table for keyboard navigation
@@ -461,11 +458,6 @@ class DockerTUIApp(App):
                 self.refresh_containers,
                 name="refresh"
             )
-            self.stats_timer = self.set_interval(
-                1.0,
-                self.update_stats,
-                name="stats"
-            )
     
     async def refresh_containers(self) -> None:
         """Refresh container list and stats."""
@@ -494,10 +486,9 @@ class DockerTUIApp(App):
             # Update table display
             await self.update_table()
             
-            # Schedule stats collection for running containers
-            running = [c for c in self.containers if c.status == 'running']
-            if running:
-                self.executor.submit(schedule_stats_collection_sync, self, running)
+            # Update stats manager with running containers
+            running_ids = [c.id for c in self.containers if c.status == 'running']
+            self.stats_manager.update_containers(running_ids)
             
         except Exception as e:
             self.log.error(f"Refresh error: {e}")
@@ -531,7 +522,7 @@ class DockerTUIApp(App):
         
         col = self.columns[col_index]
         col_name = col['name']
-        stats = self.stats_cache.get(container.id, {})
+        stats = self.stats_manager.get_stats(container.id) or {}
         
         if col_name == 'NAME':
             return container.name.lower()
@@ -671,7 +662,7 @@ class DockerTUIApp(App):
     def build_row_data(self, container) -> List:
         """Build row data for a container."""
         row_data = []
-        stats = self.stats_cache.get(container.id, {})
+        stats = self.stats_manager.get_stats(container.id) or {}
         
         for col in self.columns:
             col_name = col['name']
@@ -751,15 +742,16 @@ class DockerTUIApp(App):
         
         stats_bar.update(stats_text)
     
-    @work(thread=True)
-    def update_stats(self) -> None:
-        """Update container stats in background."""
-        if not self.docker_client:
-            return
-        
-        running_containers = [c for c in self.containers if c.status == 'running']
-        if running_containers:
-            schedule_stats_collection_sync(self, running_containers)
+    async def start_stats_collection(self) -> None:
+        """Start the stats manager."""
+        await self.stats_manager.start(self.on_stats_updated)
+    
+    async def on_stats_updated(self, stats: Dict[str, Any]) -> None:
+        """Handle stats update from stats manager."""
+        # Update cache with new stats
+        self.stats_cache = self.stats_manager.get_all_stats()
+        # Request UI update
+        await self.update_table()
     
     def get_selected_container(self) -> Optional[Any]:
         """Get currently selected container."""
@@ -858,8 +850,6 @@ class DockerTUIApp(App):
             else:
                 if self.refresh_timer:
                     self.refresh_timer.stop()
-                if self.stats_timer:
-                    self.stats_timer.stop()
         elif switch_id == "normalize-switch":
             self.normalize_logs = event.value
         elif switch_id == "wrap-switch":
@@ -1035,9 +1025,7 @@ class DockerTUIApp(App):
         """Cleanup when app closes."""
         if self.refresh_timer:
             self.refresh_timer.stop()
-        if self.stats_timer:
-            self.stats_timer.stop()
-        self.executor.shutdown(wait=False)
+        await self.stats_manager.stop()
 
 
 class ColumnSettingsModal(ModalScreen[Optional[List[Dict[str, Any]]]]):
