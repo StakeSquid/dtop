@@ -312,10 +312,20 @@ class LogViewScreen(Screen):
     """Advanced log viewer with search, filter, and normalization."""
     
     CSS = """
+    LogViewScreen {
+        overflow: hidden;
+    }
+    
+    #log-container {
+        height: 100%;
+        overflow: hidden;
+    }
+    
     #log-header {
         height: 2;
         background: $panel;
         border-bottom: solid $primary;
+        dock: top;
     }
     
     #container-name {
@@ -354,6 +364,7 @@ class LogViewScreen(Screen):
     
     Footer {
         height: 1;
+        dock: bottom;
     }
     """
     
@@ -414,7 +425,10 @@ class LogViewScreen(Screen):
     
     def compose(self) -> ComposeResult:
         """Create the log view UI."""
-        # Single-line compact header
+        # Footer at bottom
+        yield Footer()
+        
+        # Header docked at top
         with Horizontal(id="log-header"):
             yield Label(f"{self.container.name[:15]}", id="container-name")
             yield Input(placeholder="Search", id="search-input", classes="search-input")
@@ -422,10 +436,8 @@ class LogViewScreen(Screen):
             yield Label(f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'} F:{'ON' if self.is_following else 'OFF'}", id="status-compact")
             yield Label("", id="log-stats")
         
-        # Log content taking up most space
+        # Log content fills remaining space
         yield RichLog(highlight=True, markup=True, wrap=self.wrap_enabled, id="log-content")
-        
-        yield Footer()
     
     async def on_mount(self) -> None:
         """Initialize log viewer when mounted."""
