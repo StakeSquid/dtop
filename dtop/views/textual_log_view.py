@@ -390,7 +390,7 @@ class LogViewScreen(Screen):
         Binding("g", "go_top", "Top"),
         Binding("shift+g", "go_bottom", "Bottom"),
         Binding("t", "show_tail_dialog", "Tail Lines"),
-        Binding("shift+t", "toggle_timestamps", "Timestamps"),
+        Binding("shift+t", "toggle_timestamps", "Docker Time"),
         Binding("c", "clear_logs", "Clear"),
         Binding("r", "show_time_filter", "Time Filter"),
         Binding("e", "export_logs", "Export"),
@@ -424,6 +424,7 @@ class LogViewScreen(Screen):
         self.container = container
         self.app_instance = app_instance
         self.raw_logs = []
+        self.raw_logs_with_timestamps = []  # Store version with Docker timestamps
         self.processed_logs = []
         self.matches = []
         self.is_following = True
@@ -515,7 +516,7 @@ class LogViewScreen(Screen):
     def load_initial_logs(self) -> None:
         """Load initial container logs."""
         try:
-            # Get logs without Docker timestamps (they interfere with normalization)
+            # Get logs both with and without timestamps
             log_params = {
                 'follow': False
             }
@@ -523,16 +524,25 @@ class LogViewScreen(Screen):
             if self.tail_lines > 0:
                 log_params['tail'] = self.tail_lines
             
+            # Fetch logs without timestamps for normalization
             logs = self.container.logs(**log_params).decode('utf-8', errors='replace')
+            
+            # Also fetch with timestamps for display
+            log_params['timestamps'] = True
+            logs_with_ts = self.container.logs(**log_params).decode('utf-8', errors='replace')
             
             # Limit to max_lines to prevent memory issues
             lines = logs.strip().split('\n') if logs else []
+            lines_with_ts = logs_with_ts.strip().split('\n') if logs_with_ts else []
+            
             if len(lines) > self.max_lines:
                 lines = lines[-self.max_lines:]
+                lines_with_ts = lines_with_ts[-self.max_lines:]
                 logs = '\n'.join(lines)
+                logs_with_ts = '\n'.join(lines_with_ts)
             
-            # Call the handler directly from the worker thread
-            self.app.call_from_thread(self.handle_logs_loaded, logs, True, False)
+            # Call the handler with both versions
+            self.app.call_from_thread(self.handle_logs_loaded, (logs, logs_with_ts), True, False)
         except Exception as e:
             self.app.call_from_thread(self.handle_logs_loaded, f"Error loading logs: {e}", False, True)
     
@@ -542,15 +552,20 @@ class LogViewScreen(Screen):
         # Worker should only run when following; UI thread ensures that.
         
         try:
-            # Get new logs since last refresh (without Docker timestamps)
+            # Get new logs since last refresh
             log_params = {
                 'tail': min(100, self.tail_lines) if self.tail_lines > 0 else 100,
                 'follow': False
             }
             
+            # Fetch without timestamps for normalization
             logs = self.container.logs(**log_params).decode('utf-8', errors='replace')
             
-            self.app.call_from_thread(self.handle_logs_loaded, logs, False, False)
+            # Also fetch with timestamps
+            log_params['timestamps'] = True
+            logs_with_ts = self.container.logs(**log_params).decode('utf-8', errors='replace')
+            
+            self.app.call_from_thread(self.handle_logs_loaded, (logs, logs_with_ts), False, False)
         except:
             pass  # Silently fail on refresh errors
     
@@ -562,18 +577,28 @@ class LogViewScreen(Screen):
             self.initial = initial
             self.error = error
     
-    def handle_logs_loaded(self, logs: str, initial: bool = False, error: bool = False) -> None:
+    def handle_logs_loaded(self, logs, initial: bool = False, error: bool = False) -> None:
         """Handle loaded logs."""
         if error:
             log_widget = self.query_one("#log-content", RichLog)
             log_widget.write(Text(logs, style="red"))
             return
         
+        # Unpack both versions if we have them
+        if isinstance(logs, tuple):
+            logs_plain, logs_with_ts = logs
+        else:
+            # Fallback for error messages
+            logs_plain = logs
+            logs_with_ts = logs
+        
         # Parse and store logs
-        new_lines = logs.strip().split('\n') if logs else []
+        new_lines = logs_plain.strip().split('\n') if logs_plain else []
+        new_lines_with_ts = logs_with_ts.strip().split('\n') if logs_with_ts else []
         
         if initial:
             self.raw_logs = new_lines
+            self.raw_logs_with_timestamps = new_lines_with_ts
         else:
             # Check for duplicates before adding
             if self.raw_logs and new_lines:
@@ -588,13 +613,17 @@ class LogViewScreen(Screen):
                 
                 if new_start < len(new_lines):
                     truly_new = new_lines[new_start:]
+                    truly_new_with_ts = new_lines_with_ts[new_start:]
                     self.raw_logs.extend(truly_new)
+                    self.raw_logs_with_timestamps.extend(truly_new_with_ts)
             else:
                 self.raw_logs.extend(new_lines)
+                self.raw_logs_with_timestamps.extend(new_lines_with_ts)
             
             # Trim old logs if exceeding limit
             if len(self.raw_logs) > self.max_lines:
                 self.raw_logs = self.raw_logs[-self.max_lines:]
+                self.raw_logs_with_timestamps = self.raw_logs_with_timestamps[-self.max_lines:]
         
         # Process and display logs
         self.process_and_display_logs()
@@ -621,6 +650,25 @@ class LogViewScreen(Screen):
             self.processed_logs = self.normalize_logs(self.raw_logs)
         else:
             self.processed_logs = self.raw_logs
+        
+        # Add Docker timestamps if enabled (after normalization)
+        if self.show_timestamps and self.raw_logs_with_timestamps:
+            # Extract timestamps from the timestamped version and prepend to processed logs
+            processed_with_ts = []
+            for i, processed_line in enumerate(self.processed_logs):
+                if i < len(self.raw_logs_with_timestamps):
+                    # Extract timestamp from the Docker log line
+                    ts_line = self.raw_logs_with_timestamps[i]
+                    # Docker timestamp format: "2024-01-23T10:30:45.123456789Z <actual log>"
+                    if ts_line and ' ' in ts_line:
+                        timestamp = ts_line.split(' ', 1)[0]
+                        # Prepend timestamp to the processed line
+                        processed_with_ts.append(f"{timestamp} {processed_line}")
+                    else:
+                        processed_with_ts.append(processed_line)
+                else:
+                    processed_with_ts.append(processed_line)
+            self.processed_logs = processed_with_ts
         
         # Apply time filter
         if self.time_filter_from or self.time_filter_to:
@@ -1127,8 +1175,9 @@ class LogViewScreen(Screen):
         self.process_and_display_logs()
     
     def action_toggle_timestamps(self) -> None:
-        """Toggle timestamp display."""
+        """Toggle Docker timestamp display."""
         self.show_timestamps = not self.show_timestamps
+        self.app.notify(f"Docker timestamps: {'ON' if self.show_timestamps else 'OFF'}")
         self.process_and_display_logs()
     
     def action_focus_search(self) -> None:
@@ -1158,6 +1207,7 @@ class LogViewScreen(Screen):
     def action_clear_logs(self) -> None:
         """Clear displayed logs."""
         self.raw_logs = []
+        self.raw_logs_with_timestamps = []
         self.processed_logs = []
         log_widget = self.query_one("#log-content", RichLog)
         log_widget.clear()
