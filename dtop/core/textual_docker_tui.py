@@ -45,17 +45,16 @@ class ContainerActionModal(ModalScreen):
     """Modal dialog for container actions."""
     
     CSS = """
-    ContainerActionModal {
-        align: center middle;
-    }
+    ContainerActionModal { align: center middle; }
     
     #action-dialog {
-        width: 50;
-        height: auto;
+        width: 60;
+        height: 80%;
         max-height: 80%;
         padding: 1 2;
         background: $surface;
         border: thick $primary;
+        layout: vertical;
     }
     
     #action-title {
@@ -63,17 +62,32 @@ class ContainerActionModal(ModalScreen):
         text-style: bold;
         color: $primary;
         margin: 0 0 1 0;
+        height: auto;
+        dock: top;
     }
     
-    .action-button {
+    #action-list { 
+        height: 1fr;
         width: 100%;
-        margin: 0 0 1 0;
     }
     
-    .action-section {
+    #cancel {
+        dock: bottom;
+        height: auto;
+    }
+    
+    .action-button { width: 100%; margin: 0 0 1 0; }
+    
+    .section-separator {
+        width: 100%;
+        height: 1;
         margin: 1 0;
         border-top: dashed $primary-background;
-        padding-top: 1;
+    }
+    
+    .info-text {
+        margin: 0 0 0 0;
+        padding: 0 0 1 0;
     }
     """
     
@@ -94,18 +108,24 @@ class ContainerActionModal(ModalScreen):
         with Vertical(id="action-dialog"):
             yield Label(f"📦 {self.container.name[:30]}", id="action-title")
             
-            # Information section
-            yield Static(f"Image: {self.container.image.tags[0] if self.container.image.tags else '<none>'}")
-            yield Static(f"Status: {self.container.status}")
-            yield Static(f"ID: {self.container.short_id}")
-            
-            # Actions section
-            with Vertical(classes="action-section"):
+            # Scrollable middle content - FLATTENED structure
+            with ScrollableContainer(id="action-list"):
+                # Information section
+                yield Static(f"Image: {self.container.image.tags[0] if self.container.image.tags else '<none>'}", classes="info-text")
+                yield Static(f"Status: {self.container.status}", classes="info-text")
+                yield Static(f"ID: {self.container.short_id}", classes="info-text")
+                
+                # Section separator
+                yield Static("", classes="section-separator")
+                
+                # Actions section - directly yield buttons, no nested container
                 yield Button("📜 View Logs", id="logs", classes="action-button", variant="primary")
                 yield Button("🔍 Inspect", id="inspect", classes="action-button", variant="primary")
-            
-            # Control section
-            with Vertical(classes="action-section"):
+                
+                # Section separator
+                yield Static("", classes="section-separator")
+                
+                # Control section - directly yield buttons, no nested container
                 if is_running:
                     yield Button("⏹️ Stop", id="stop", classes="action-button", variant="warning")
                     if not is_paused:
@@ -121,6 +141,7 @@ class ContainerActionModal(ModalScreen):
                 yield Button("♻️ Recreate", id="recreate", classes="action-button", variant="error")
                 yield Button("🗑️ Remove", id="remove", classes="action-button", variant="error")
             
+            # Fixed bottom action
             yield Button("Cancel", id="cancel", classes="action-button", variant="default")
     
     @on(Button.Pressed)
@@ -928,14 +949,24 @@ class ColumnSettingsModal(ModalScreen[Optional[List[Dict[str, Any]]]]):
 
     CSS = """
     ColumnSettingsModal { align: center middle; }
-    #columns-dialog { width: 60; height: auto; max-height: 80%; padding: 1 2; background: $surface; border: thick $primary; }
+    #columns-dialog {
+        width: 70;
+        height: 80%;
+        max-height: 80%;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+        layout: grid;
+        grid-rows: auto 1fr auto;
+        grid-columns: 1fr;
+    }
     #columns-title { text-align: center; text-style: bold; color: $primary; margin: 0 0 1 0; }
-    .row { layout: horizontal; height: auto; margin: 0 0 1 0; }
-    .name { width: 20; }
-    .field { width: 10; margin-left: 1; }
-    .actions { layout: horizontal; margin-top: 1; }
+    .row { layout: horizontal; height: auto; margin: 0 0 1 0; width: 100%; }
+    .name { width: 24; }
+    .field { width: 12; margin-left: 1; }
+    .actions { layout: horizontal; margin-top: 1; width: 100%; }
     .action-button { width: 1fr; margin: 0 1 0 0; }
-    #columns-list { height: 1fr; }
+    #columns-list { height: 1fr; width: 100%; }
     """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
