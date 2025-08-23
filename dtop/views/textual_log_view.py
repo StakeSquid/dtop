@@ -451,6 +451,11 @@ class LogViewScreen(Screen):
         """Initialize log viewer when mounted."""
         self.set_interval(self.log_update_interval, self.refresh_logs)
         self.load_initial_logs()
+        # Ensure initial focus is on the logs, not the search bar
+        try:
+            self.query_one("#log-content", RichLog).focus()
+        except Exception:
+            pass
     
     @work(thread=True)
     def load_initial_logs(self) -> None:
