@@ -7,6 +7,7 @@ Advanced log viewer using Textual with search, filter, and normalization.
 import re
 import subprocess
 import os
+import sys
 from typing import List, Optional, Tuple, Dict
 from datetime import datetime
 from pathlib import Path
@@ -378,8 +379,9 @@ class LogViewScreen(Screen):
     
     BINDINGS = [
         Binding("escape", "dismiss", "Back/Clear"),
-        Binding("n", "next_search_or_normalize", "Next/Normalize"),
-        Binding("shift+n", "prev_search", "Prev Match"),
+        Binding("n", "next_search", "Next Match"),
+        Binding("shift+n", "toggle_normalize", "Toggle Normalize"),
+        Binding("p", "prev_search", "Prev Match"),
         Binding("w", "toggle_wrap", "Toggle Wrap"),
         Binding("/", "focus_search", "Search"),
         Binding("\\", "focus_filter", "Filter"),
@@ -611,6 +613,12 @@ class LogViewScreen(Screen):
                 pass
         log_widget.clear()
         
+        # Return early if no logs
+        if not self.raw_logs:
+            log_widget.write(Text("No logs available yet...", style="dim"))
+            self.update_status_labels()
+            return
+        
         # Apply normalization if enabled
         if self.normalize_enabled:
             self.processed_logs = self.normalize_logs(self.raw_logs)
@@ -647,22 +655,24 @@ class LogViewScreen(Screen):
             return logs
             
         if not os.path.exists(self.normalize_script):
+            self.app.notify(f"Normalize script not found: {self.normalize_script}", severity="warning")
             return logs
         
         # Make sure the script is executable
         if not os.access(self.normalize_script, os.X_OK):
             try:
                 os.chmod(self.normalize_script, 0o755)
-            except OSError:
+            except OSError as e:
+                self.app.notify(f"Cannot make script executable: {e}", severity="warning")
                 return logs
         
         try:
             # Join log lines for input
             log_text = '\n'.join(logs)
             
-            # Run normalization script with Python explicitly
+            # Run normalization script with the current Python interpreter
             process = subprocess.Popen(
-                ['python3', self.normalize_script],
+                [sys.executable, self.normalize_script],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -673,23 +683,27 @@ class LogViewScreen(Screen):
             stdout, stderr = process.communicate(input=log_text, timeout=3)
             
             # Check for errors
-            if process.returncode != 0 and stderr:
-                # Log error but return original logs
+            if process.returncode != 0:
+                if stderr:
+                    self.app.notify(f"Normalization error: {stderr[:100]}", severity="error")
                 return logs
             
             # Split output into lines and return
             if stdout:
                 normalized = stdout.splitlines()
                 # Filter out empty lines that weren't in original
-                return normalized if normalized else logs
+                if normalized:
+                    return normalized
+                else:
+                    return logs
             else:
                 return logs
                 
         except subprocess.TimeoutExpired:
-            # Handle timeout by returning original logs
+            self.app.notify("Normalization timeout", severity="warning")
             return logs
-        except (subprocess.SubprocessError, OSError, Exception):
-            # Return original logs on any error
+        except Exception as e:
+            self.app.notify(f"Normalization failed: {str(e)[:100]}", severity="error")
             return logs
     
     def filter_logs(self, logs: List[str], filter_expr: str) -> List[str]:
@@ -1069,13 +1083,17 @@ class LogViewScreen(Screen):
         else:
             self.app.pop_screen()
     
-    def action_next_search_or_normalize(self) -> None:
-        """Next search match or toggle normalization."""
+    def action_next_search(self) -> None:
+        """Next search match."""
         if self.search_term and self.matches:
             self.next_match()
-        else:
-            self.normalize_enabled = not self.normalize_enabled
-            self.process_and_display_logs()
+    
+    def action_toggle_normalize(self) -> None:
+        """Toggle log normalization."""
+        self.normalize_enabled = not self.normalize_enabled
+        self.app.notify(f"Normalization: {'ON' if self.normalize_enabled else 'OFF'}")
+        self.update_status_labels()
+        self.process_and_display_logs()
     
     def action_prev_search(self) -> None:
         """Previous search match."""
