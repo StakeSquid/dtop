@@ -18,7 +18,7 @@ from textual import on, work
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
-from textual.widgets import DataTable, Footer, Header, Input, Label, Static, Button, Switch
+from textual.widgets import DataTable, Footer, Header, Input, Label, Static, Button, Switch, RichLog
 from textual.reactive import reactive
 from textual.screen import Screen, ModalScreen
 from textual.binding import Binding
@@ -949,24 +949,35 @@ class ColumnSettingsModal(ModalScreen[Optional[List[Dict[str, Any]]]]):
 
     CSS = """
     ColumnSettingsModal { align: center middle; }
-    #columns-dialog {
-        width: 70;
-        height: 80%;
-        max-height: 80%;
-        padding: 1 2;
-        background: $surface;
+    #columns-dialog { 
+        width: 70; 
+        height: 80%; 
+        max-height: 80%; 
+        padding: 1 2; 
+        background: $surface; 
         border: thick $primary;
-        layout: grid;
-        grid-rows: auto 1fr auto;
-        grid-columns: 1fr;
+        layout: vertical;
     }
-    #columns-title { text-align: center; text-style: bold; color: $primary; margin: 0 0 1 0; }
+    #columns-title { 
+        text-align: center; 
+        text-style: bold; 
+        color: $primary; 
+        margin: 0 0 1 0;
+        dock: top;
+        height: auto;
+    }
     .row { layout: horizontal; height: auto; margin: 0 0 1 0; width: 100%; }
-    .name { width: 24; }
-    .field { width: 12; margin-left: 1; }
-    .actions { layout: horizontal; margin-top: 1; width: 100%; }
+    .name { width: 20; }
+    .field { width: 10; margin-left: 1; }
+    #actions { 
+        layout: horizontal; 
+        margin-top: 1; 
+        width: 100%;
+        dock: bottom;
+        height: auto;
+    }
     .action-button { width: 1fr; margin: 0 1 0 0; }
-    #columns-list { height: 1fr; width: 100%; }
+    #columns-list { height: 1fr; width: 100%; overflow-y: auto; }
     """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
@@ -977,7 +988,10 @@ class ColumnSettingsModal(ModalScreen[Optional[List[Dict[str, Any]]]]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="columns-dialog"):
+            # Fixed top title
             yield Label("Column Settings", id="columns-title")
+            
+            # Scrollable middle section
             with ScrollableContainer(id="columns-list"):
                 for i, col in enumerate(self._columns):
                     with Horizontal(classes="row"):
@@ -989,7 +1003,9 @@ class ColumnSettingsModal(ModalScreen[Optional[List[Dict[str, Any]]]]):
                         yield Input(value=min_value, id=f"min_{i}", classes="field")
                         yield Label("max:")
                         yield Input(value=max_value, id=f"max_{i}", placeholder="none", classes="field")
-            with Horizontal(classes="actions"):
+            
+            # Fixed bottom buttons
+            with Container(id="actions"):
                 yield Button("Save", id="save", classes="action-button", variant="primary")
                 yield Button("Cancel", id="cancel", classes="action-button")
 
