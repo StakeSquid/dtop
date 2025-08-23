@@ -326,6 +326,8 @@ class LogViewScreen(Screen):
         background: $panel;
         border-bottom: solid $primary;
         dock: top;
+        padding: 0 1;
+        content-align: left middle;
     }
     
     #container-name {
@@ -336,12 +338,18 @@ class LogViewScreen(Screen):
     
     .search-input {
         width: 20;
+        height: 1;
         margin: 0;
+        padding: 0;
+        border: none;
     }
     
     .filter-input {
         width: 20;
+        height: 1;
         margin: 0;
+        padding: 0;
+        border: none;
     }
     
     #status-compact {
