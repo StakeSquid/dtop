@@ -616,7 +616,6 @@ class LogViewScreen(Screen):
         # Return early if no logs
         if not self.raw_logs:
             log_widget.write(Text("No logs available yet...", style="dim"))
-            self.update_status_labels()
             return
         
         # Apply normalization if enabled
@@ -1092,7 +1091,16 @@ class LogViewScreen(Screen):
         """Toggle log normalization."""
         self.normalize_enabled = not self.normalize_enabled
         self.app.notify(f"Normalization: {'ON' if self.normalize_enabled else 'OFF'}")
-        self.update_status_labels()
+        
+        # Update status label
+        try:
+            status_label = self.query_one("#status-compact", Label)
+            status_label.update(
+                f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'} F:{'ON' if self.is_following else 'OFF'}"
+            )
+        except:
+            pass
+        
         self.process_and_display_logs()
     
     def action_prev_search(self) -> None:
