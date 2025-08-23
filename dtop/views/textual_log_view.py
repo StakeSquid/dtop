@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple, Dict
 from datetime import datetime
 from pathlib import Path
 
-from textual import on, work
+from textual import on, work, events
 from textual.app import ComposeResult
 from textual.screen import Screen, ModalScreen
 from textual.widgets import Header, Footer, RichLog, Input, Label, Static, Button, RadioSet, RadioButton
@@ -397,6 +397,11 @@ class LogViewScreen(Screen):
         Binding("pagedown", "page_down", "Page Down", show=False),
         Binding("home", "go_top", "Home", show=False),
         Binding("end", "go_bottom", "End", show=False),
+        # Common scroll keys also disable follow
+        Binding("up", "page_up", "Up", show=False),
+        Binding("down", "page_down", "Down", show=False),
+        Binding("k", "page_up", "Up", show=False),
+        Binding("j", "page_down", "Down", show=False),
     ]
     
     # Reactive properties
@@ -449,13 +454,60 @@ class LogViewScreen(Screen):
     
     async def on_mount(self) -> None:
         """Initialize log viewer when mounted."""
-        self.set_interval(self.log_update_interval, self.refresh_logs)
+        # Use a UI-thread tick that checks scroll position before spawning worker
+        self.set_interval(self.log_update_interval, self._tick_refresh)
         self.load_initial_logs()
         # Ensure initial focus is on the logs, not the search bar
         try:
-            self.query_one("#log-content", RichLog).focus()
+            log_widget = self.query_one("#log-content", RichLog)
+            log_widget.focus()
+            # Keep RichLog auto-scroll in sync with follow state
+            try:
+                log_widget.auto_scroll = self.is_following
+            except Exception:
+                pass
         except Exception:
             pass
+
+    def _is_view_at_bottom(self) -> bool:
+        """Best-effort check if the log view is at the bottom (UI thread)."""
+        try:
+            log_widget = self.query_one("#log-content", RichLog)
+        except Exception:
+            return True
+        # Try RichLog-specific flags if present
+        at_end = getattr(log_widget, "is_at_end", None)
+        if isinstance(at_end, bool):
+            return at_end
+        # Fallback to geometry-based check
+        try:
+            vs = getattr(log_widget, "virtual_size", None)
+            so = getattr(log_widget, "scroll_offset", None)
+            sz = getattr(log_widget, "size", None)
+            if vs and so and sz:
+                bottom_threshold = max(0, vs.height - sz.height - 1)
+                return so.y >= bottom_threshold
+        except Exception:
+            pass
+        # Default to True to avoid surprising disables
+        return True
+
+    def _tick_refresh(self) -> None:
+        """UI-thread refresh tick: disable follow if user is not at bottom, else fetch logs."""
+        # If user scrolled away, disable follow and keep position
+        if not self._is_view_at_bottom():
+            if self.is_following:
+                self.is_following = False
+                # Sync auto_scroll and status
+                try:
+                    self.query_one("#log-content", RichLog).auto_scroll = False
+                except Exception:
+                    pass
+                self.update_stats()
+            return
+        # Only refresh when following
+        if self.is_following:
+            self.refresh_logs()
     
     @work(thread=True)
     def load_initial_logs(self) -> None:
@@ -486,8 +538,7 @@ class LogViewScreen(Screen):
     @work(thread=True)
     def refresh_logs(self) -> None:
         """Refresh logs periodically if following."""
-        if not self.is_following:
-            return
+        # Worker should only run when following; UI thread ensures that.
         
         try:
             # Get new logs since last refresh
@@ -551,6 +602,13 @@ class LogViewScreen(Screen):
     def process_and_display_logs(self) -> None:
         """Process logs with normalization and filters."""
         log_widget = self.query_one("#log-content", RichLog)
+        # If user is not at bottom, auto-disable follow to prevent jumps
+        if self.is_following and not self._is_view_at_bottom():
+            self.is_following = False
+            try:
+                log_widget.auto_scroll = False
+            except Exception:
+                pass
         log_widget.clear()
         
         # Apply normalization if enabled
@@ -576,9 +634,12 @@ class LogViewScreen(Screen):
         # Update stats
         self.update_stats()
         
-        # Scroll to bottom if following
+        # Scroll to bottom if following (and still at bottom)
         if self.is_following:
-            log_widget.scroll_end()
+            try:
+                log_widget.scroll_end()
+            except Exception:
+                pass
     
     def normalize_logs(self, logs: List[str]) -> List[str]:
         """Normalize log lines using the normalize script."""
@@ -934,9 +995,14 @@ class LogViewScreen(Screen):
         return text
     
     def update_stats(self) -> None:
-        """Update statistics display."""
+        """Update statistics display and sync follow state."""
         try:
             stats_label = self.query_one("#log-stats", Label)
+            # Keep RichLog auto-scroll in sync with follow mode
+            try:
+                self.query_one("#log-content", RichLog).auto_scroll = self.is_following
+            except Exception:
+                pass
             stats = f"L:{len(self.raw_logs)}"
             
             if self.tail_lines > 0:
@@ -988,6 +1054,11 @@ class LogViewScreen(Screen):
     def action_toggle_follow(self) -> None:
         """Toggle follow mode."""
         self.is_following = not self.is_following
+        # Sync RichLog auto-scroll immediately
+        try:
+            self.query_one("#log-content", RichLog).auto_scroll = self.is_following
+        except Exception:
+            pass
         self.update_stats()
         if self.is_following:
             log_widget = self.query_one("#log-content", RichLog)
@@ -1076,12 +1147,19 @@ class LogViewScreen(Screen):
         log_widget = self.query_one("#log-content", RichLog)
         log_widget.scroll_page_up()
         self.is_following = False
+        self.update_stats()
     
     def action_page_down(self) -> None:
         """Scroll down one page."""
         log_widget = self.query_one("#log-content", RichLog)
         log_widget.scroll_page_down()
         self.is_following = False
+        self.update_stats()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        """Disable follow when user scrolls up with mouse."""
+        self.is_following = False
+        self.update_stats()
     
     def action_export_logs(self) -> None:
         """Export logs with dialog."""
