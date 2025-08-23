@@ -515,9 +515,8 @@ class LogViewScreen(Screen):
     def load_initial_logs(self) -> None:
         """Load initial container logs."""
         try:
-            # Get logs with timestamps
+            # Get logs without Docker timestamps (they interfere with normalization)
             log_params = {
-                'timestamps': True,
                 'follow': False
             }
             
@@ -543,10 +542,9 @@ class LogViewScreen(Screen):
         # Worker should only run when following; UI thread ensures that.
         
         try:
-            # Get new logs since last refresh
+            # Get new logs since last refresh (without Docker timestamps)
             log_params = {
                 'tail': min(100, self.tail_lines) if self.tail_lines > 0 else 100,
-                'timestamps': True,
                 'follow': False
             }
             
@@ -654,15 +652,14 @@ class LogViewScreen(Screen):
             return logs
             
         if not os.path.exists(self.normalize_script):
-            self.app.notify(f"Normalize script not found: {self.normalize_script}", severity="warning")
+            # Script not found, return original logs
             return logs
         
         # Make sure the script is executable
         if not os.access(self.normalize_script, os.X_OK):
             try:
                 os.chmod(self.normalize_script, 0o755)
-            except OSError as e:
-                self.app.notify(f"Cannot make script executable: {e}", severity="warning")
+            except OSError:
                 return logs
         
         try:
@@ -683,26 +680,21 @@ class LogViewScreen(Screen):
             
             # Check for errors
             if process.returncode != 0:
-                if stderr:
-                    self.app.notify(f"Normalization error: {stderr[:100]}", severity="error")
+                # Return original logs on error
                 return logs
             
             # Split output into lines and return
             if stdout:
                 normalized = stdout.splitlines()
-                # Filter out empty lines that weren't in original
+                # Return normalized logs if we got them
                 if normalized:
                     return normalized
-                else:
-                    return logs
-            else:
-                return logs
-                
-        except subprocess.TimeoutExpired:
-            self.app.notify("Normalization timeout", severity="warning")
+            
+            # Fall back to original logs
             return logs
-        except Exception as e:
-            self.app.notify(f"Normalization failed: {str(e)[:100]}", severity="error")
+                
+        except (subprocess.TimeoutExpired, Exception):
+            # Return original logs on any error
             return logs
     
     def filter_logs(self, logs: List[str], filter_expr: str) -> List[str]:
