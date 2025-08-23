@@ -289,7 +289,12 @@ class DockerTUIApp(App):
         self.columns = load_config()
         self.refresh_timer = None
         self.stats_timer = None
-        self.sort_column = None
+        # Default sort by NAME column if present
+        try:
+            name_index = next((i for i, c in enumerate(self.columns) if c.get('name') == 'NAME'), 0)
+        except Exception:
+            name_index = 0
+        self.sort_column = name_index
         self.sort_reverse = False
         self.selected_container_id = None
         self.last_refresh = 0
