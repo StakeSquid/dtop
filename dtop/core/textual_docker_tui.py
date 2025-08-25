@@ -16,7 +16,7 @@ from textual import on, work
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
-from textual.widgets import DataTable, Footer, Header, Input, Label, Static, Button, Switch, RichLog
+from textual.widgets import DataTable, Footer, Header, Input, Label, Static, Button, Switch, RichLog, Select
 from textual.reactive import reactive
 from textual.screen import Screen, ModalScreen
 from textual.binding import Binding
@@ -213,6 +213,12 @@ class DockerTUIApp(App):
         padding: 0;
         border: none;
     }
+    
+    #status-filter {
+        width: 15;
+        height: 1;
+        margin: 0 1;
+    }
 
     #match-status {
         width: 14;
@@ -303,6 +309,7 @@ class DockerTUIApp(App):
     # Reactive properties
     filter_text = reactive("")
     search_text = reactive("")
+    status_filter = reactive("all")
     current_match_index = reactive(-1)
     total_matches = reactive(0)
     normalize_logs = reactive(True)
@@ -429,6 +436,20 @@ class DockerTUIApp(App):
         with Horizontal(id="filter-bar"):
             yield Input(placeholder="Search", id="search-input", classes="search-input")
             yield Input(placeholder="Filter", id="filter-input", classes="filter-input")
+            yield Select(
+                [("All", "all"), 
+                 ("Running", "running"), 
+                 ("Exited", "exited"), 
+                 ("Stopped", "stopped"),
+                 ("Paused", "paused"),
+                 ("Created", "created"),
+                 ("Restarting", "restarting"),
+                 ("Removing", "removing"),
+                 ("Dead", "dead")],
+                prompt="Status",
+                value="all",
+                id="status-filter"
+            )
             yield Label("", id="match-status")
             yield Label("", id="connection-status")
 
@@ -526,18 +547,25 @@ class DockerTUIApp(App):
     
     async def apply_filter_and_sort(self) -> None:
         """Apply filtering and sorting to containers."""
-        # Filter
+        # Start with all containers
+        filtered = self.containers.copy()
+        
+        # Apply status filter
+        if self.status_filter and self.status_filter != "all":
+            filtered = [c for c in filtered if c.status.lower() == self.status_filter.lower()]
+        
+        # Apply text filter
         if self.filter_text:
             filter_lower = self.filter_text.lower()
-            self.filtered_containers = [
-                c for c in self.containers
+            filtered = [
+                c for c in filtered
                 if filter_lower in c.name.lower() or
                    (c.image.tags and filter_lower in c.image.tags[0].lower()) or
                    filter_lower in c.status.lower() or
                    filter_lower in c.short_id.lower()
             ]
-        else:
-            self.filtered_containers = self.containers.copy()
+        
+        self.filtered_containers = filtered
         
         # Sort
         if self.sort_column is not None:
@@ -1010,6 +1038,13 @@ class DockerTUIApp(App):
         self._update_match_status()
         self._jump_to_current_match()
     
+    @on(Select.Changed)
+    def on_status_filter_changed(self, event: Select.Changed) -> None:
+        """Handle status filter dropdown change."""
+        if event.select.id == "status-filter":
+            self.status_filter = event.value
+            asyncio.create_task(self.refresh_containers())
+    
     @on(Switch.Changed)
     def on_switch_changed(self, event: Switch.Changed) -> None:
         """Handle switch toggles."""
@@ -1093,6 +1128,13 @@ class DockerTUIApp(App):
         filter_input = self.query_one("#filter-input", Input)
         filter_input.value = ""
         self.filter_text = ""
+        # Reset status filter to all
+        try:
+            status_select = self.query_one("#status-filter", Select)
+            status_select.value = "all"
+        except Exception:
+            pass
+        self.status_filter = "all"
         # Also clear search if present
         try:
             search_input = self.query_one("#search-input", Input)
