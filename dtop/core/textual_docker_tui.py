@@ -307,8 +307,6 @@ class DockerTUIApp(App):
     total_matches = reactive(0)
     normalize_logs = reactive(True)
     wrap_lines = reactive(True)
-    show_all = reactive(True)
-    auto_refresh = reactive(True)
     refresh_interval = reactive(2.0)
     
     def __init__(self):
@@ -432,10 +430,6 @@ class DockerTUIApp(App):
             yield Input(placeholder="Search", id="search-input", classes="search-input")
             yield Input(placeholder="Filter", id="filter-input", classes="filter-input")
             yield Label("", id="match-status")
-            yield Label("All", classes="status-indicator")
-            yield Switch(value=self.show_all, id="show-all-switch", classes="compact-switch")
-            yield Label("Auto", classes="status-indicator")
-            yield Switch(value=self.auto_refresh, id="auto-refresh-switch", classes="compact-switch")
             yield Label("", id="connection-status")
 
         # Container table fills remaining space
@@ -491,12 +485,11 @@ class DockerTUIApp(App):
     
     async def start_refresh_timers(self) -> None:
         """Start automatic refresh timers."""
-        if self.auto_refresh:
-            self.refresh_timer = self.set_interval(
-                self.refresh_interval,
-                self.refresh_containers,
-                name="refresh"
-            )
+        self.refresh_timer = self.set_interval(
+            self.refresh_interval,
+            self.refresh_containers,
+            name="refresh"
+        )
     
     async def refresh_containers(self) -> None:
         """Refresh container list and stats."""
@@ -510,11 +503,8 @@ class DockerTUIApp(App):
         self.last_refresh = current_time
         
         try:
-            # Get all containers or just running based on setting
-            if self.show_all:
-                self.containers = self.docker_client.containers.list(all=True)
-            else:
-                self.containers = self.docker_client.containers.list(all=False)
+            # Always get all containers
+            self.containers = self.docker_client.containers.list(all=True)
             
             # Build container map for quick lookup
             self.container_map = {c.id: c for c in self.containers}
@@ -987,17 +977,7 @@ class DockerTUIApp(App):
         """Handle switch toggles."""
         switch_id = event.switch.id
         
-        if switch_id == "show-all-switch":
-            self.show_all = event.value
-            asyncio.create_task(self.refresh_containers())
-        elif switch_id == "auto-refresh-switch":
-            self.auto_refresh = event.value
-            if event.value:
-                asyncio.create_task(self.start_refresh_timers())
-            else:
-                if self.refresh_timer:
-                    self.refresh_timer.stop()
-        elif switch_id == "normalize-switch":
+        if switch_id == "normalize-switch":
             self.normalize_logs = event.value
         elif switch_id == "wrap-switch":
             self.wrap_lines = event.value
