@@ -184,11 +184,38 @@ class DockerTUIApp(App):
         background: $panel;
         padding: 0 1;
         border-bottom: solid $primary;
+        dock: top;
     }
-    
+
+    .search-input {
+        width: 20;
+        height: 1;
+        margin: 0;
+        padding: 0;
+        border: none;
+    }
+
+    #search-input {
+        width: 20;
+        margin: 0 1;
+    }
+
     #filter-input {
         width: 20;
         margin: 0 1;
+    }
+
+    .filter-input {
+        width: 20;
+        height: 1;
+        margin: 0;
+        padding: 0;
+        border: none;
+    }
+
+    #match-status {
+        width: 14;
+        color: $text-muted;
     }
     
     #stats-bar {
@@ -196,7 +223,7 @@ class DockerTUIApp(App):
     }
     
     #container-table {
-        height: 100%;
+        height: 1fr;
         scrollbar-background: $panel;
         scrollbar-corner-color: $panel;
     }
@@ -257,10 +284,13 @@ class DockerTUIApp(App):
         Binding("l", "view_logs", "Logs", show=True),
         Binding("i", "inspect", "Inspect", show=True),
         Binding("enter", "show_actions", "Actions", show=True),
+        Binding("/", "focus_search", "Search"),
+        Binding("n", "search_next", "Next", show=False),
+        Binding("p", "search_prev", "Prev", show=False),
         Binding("\\", "focus_filter", "Filter"),
         Binding("escape", "clear_filter", "Clear"),
-        Binding("n", "toggle_normalize", "Normalize"),
-        Binding("w", "toggle_wrap", "Wrap"),
+        Binding("shift+n", "toggle_normalize", "Normalize"),
+        Binding("shift+w", "toggle_wrap", "Wrap"),
         Binding("s", "sort_dialog", "Sort"),
         Binding("?", "help", "Help"),
         Binding("d", "toggle_dark", "Theme"),
@@ -269,6 +299,9 @@ class DockerTUIApp(App):
     
     # Reactive properties
     filter_text = reactive("")
+    search_text = reactive("")
+    current_match_index = reactive(-1)
+    total_matches = reactive(0)
     normalize_logs = reactive(True)
     wrap_lines = reactive(True)
     show_all = reactive(True)
@@ -281,6 +314,7 @@ class DockerTUIApp(App):
         self.containers = []
         self.filtered_containers = []
         self.container_map = {}
+        self._search_matches: List[str] = []  # container IDs matching search
         self.stats_manager = StatsManager()
         self.stats_cache = {}
         self.columns = load_config()
@@ -390,20 +424,22 @@ class DockerTUIApp(App):
     
     def compose(self) -> ComposeResult:
         """Create the main UI."""
-        with Vertical(id="main-container"):
-            # Compact filter bar with controls
-            with Horizontal(id="filter-bar"):
-                yield Input(placeholder="Filter...", id="filter-input")
-                yield Label("All", classes="status-indicator")
-                yield Switch(value=self.show_all, id="show-all-switch", classes="compact-switch")
-                yield Label("Auto", classes="status-indicator")
-                yield Switch(value=self.auto_refresh, id="auto-refresh-switch", classes="compact-switch")
-                yield Label("", id="connection-status")
-            
-            # Container table taking up most space
-            table = DataTable(id="container-table", cursor_type="row", zebra_stripes=True)
-            yield table
-        
+        # Header bar docked at top (like logs)
+        with Horizontal(id="filter-bar"):
+            yield Input(placeholder="Search", id="search-input", classes="search-input")
+            yield Input(placeholder="Filter", id="filter-input", classes="filter-input")
+            yield Label("", id="match-status")
+            yield Label("All", classes="status-indicator")
+            yield Switch(value=self.show_all, id="show-all-switch", classes="compact-switch")
+            yield Label("Auto", classes="status-indicator")
+            yield Switch(value=self.auto_refresh, id="auto-refresh-switch", classes="compact-switch")
+            yield Label("", id="connection-status")
+
+        # Container table fills remaining space
+        table = DataTable(id="container-table", cursor_type="row", zebra_stripes=True)
+        yield table
+
+        # Footer docked at bottom
         yield Footer()
     
     async def on_mount(self) -> None:
@@ -482,6 +518,8 @@ class DockerTUIApp(App):
             
             # Apply filter and sort
             await self.apply_filter_and_sort()
+            # Recompute search matches when list changes
+            self._compute_search_matches()
             
             # Update table display
             await self.update_table()
@@ -797,6 +835,73 @@ class DockerTUIApp(App):
             return self.container_map.get(self.selected_container_id)
         
         return None
+
+    def _compute_search_matches(self) -> None:
+        """Compute container IDs that match current search within the filtered list."""
+        self._search_matches = []
+        self.total_matches = 0
+        self.current_match_index = -1
+        if not self.search_text:
+            self._update_match_status()
+            return
+        s = self.search_text.lower()
+        for c in self.filtered_containers:
+            try:
+                image = (c.image.tags[0] if c.image.tags else "")
+            except Exception:
+                image = ""
+            if (
+                s in (c.name or "").lower()
+                or s in (c.short_id or "").lower()
+                or s in (c.status or "").lower()
+                or s in image.lower()
+            ):
+                self._search_matches.append(c.id)
+        self.total_matches = len(self._search_matches)
+        self.current_match_index = 0 if self.total_matches > 0 else -1
+        self._update_match_status()
+
+    def _update_match_status(self) -> None:
+        """Update match status label in header."""
+        try:
+            label = self.query_one("#match-status", Label)
+            if self.total_matches > 0 and self.current_match_index >= 0:
+                label.update(f"Match {self.current_match_index+1}/{self.total_matches}")
+            elif self.search_text:
+                label.update("No matches")
+            else:
+                label.update("")
+        except Exception:
+            pass
+
+    def _jump_to_current_match(self) -> None:
+        """Move the table cursor to the current matched container if exists."""
+        if not self._search_matches or self.current_match_index < 0:
+            return
+        match_id = self._search_matches[self.current_match_index]
+        # Find row index for this container
+        table = self.query_one("#container-table", DataTable)
+        try:
+            # Iterate rows to match key value to container id
+            for row_idx in range(table.row_count):
+                key_val = None
+                try:
+                    key = table.get_row_key(row_idx)  # type: ignore[attr-defined]
+                    key_val = getattr(key, "value", key)
+                except Exception:
+                    try:
+                        rows = getattr(table, "rows", None)
+                        if rows is not None:
+                            rk = rows[row_idx]
+                            key_val = getattr(rk, "value", rk)
+                    except Exception:
+                        pass
+                if key_val == match_id:
+                    table.cursor_coordinate = Coordinate(row_idx, 0)
+                    self.selected_container_id = match_id
+                    break
+        except Exception:
+            pass
     
     @on(DataTable.HeaderSelected)
     def on_header_selected(self, event: DataTable.HeaderSelected) -> None:
@@ -834,6 +939,34 @@ class DockerTUIApp(App):
         """Handle filter input change."""
         self.filter_text = event.value
         asyncio.create_task(self.refresh_containers())
+
+    @on(Input.Changed, "#search-input")
+    def on_search_changed(self, event: Input.Changed) -> None:
+        """Handle search input change for containers list."""
+        self.search_text = event.value
+        self._compute_search_matches()
+
+    @on(Input.Submitted, "#search-input")
+    def on_search_submitted(self, event: Input.Submitted) -> None:
+        """Jump to first match when submitting search."""
+        if self._search_matches:
+            self._jump_to_current_match()
+
+    def action_search_next(self) -> None:
+        """Move to next container search match and select it."""
+        if self.total_matches <= 0:
+            return
+        self.current_match_index = (self.current_match_index + 1) % self.total_matches
+        self._update_match_status()
+        self._jump_to_current_match()
+
+    def action_search_prev(self) -> None:
+        """Move to previous container search match and select it."""
+        if self.total_matches <= 0:
+            return
+        self.current_match_index = (self.current_match_index - 1) % self.total_matches
+        self._update_match_status()
+        self._jump_to_current_match()
     
     @on(Switch.Changed)
     def on_switch_changed(self, event: Switch.Changed) -> None:
@@ -918,12 +1051,24 @@ class DockerTUIApp(App):
     def action_focus_filter(self) -> None:
         """Focus filter input."""
         self.query_one("#filter-input", Input).focus()
+
+    def action_focus_search(self) -> None:
+        """Focus search input."""
+        self.query_one("#search-input", Input).focus()
     
     def action_clear_filter(self) -> None:
         """Clear filter."""
         filter_input = self.query_one("#filter-input", Input)
         filter_input.value = ""
         self.filter_text = ""
+        # Also clear search if present
+        try:
+            search_input = self.query_one("#search-input", Input)
+            search_input.value = ""
+        except Exception:
+            pass
+        self.search_text = ""
+        self._compute_search_matches()
         asyncio.create_task(self.refresh_containers())
     
     def action_toggle_normalize(self) -> None:

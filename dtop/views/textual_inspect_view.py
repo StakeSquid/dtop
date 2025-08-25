@@ -30,6 +30,23 @@ class InspectViewScreen(Screen):
         padding: 0 1;
         background: $panel;
         border-bottom: solid $primary;
+        dock: top;
+    }
+
+    .search-input {
+        width: 25;
+        height: 1;
+        margin: 0;
+        padding: 0;
+        border: none;
+    }
+
+    .filter-input {
+        width: 25;
+        height: 1;
+        margin: 0;
+        padding: 0;
+        border: none;
     }
     
     #container-title {
@@ -38,6 +55,11 @@ class InspectViewScreen(Screen):
     }
     
     #search-input {
+        width: 25;
+        margin: 0 1;
+    }
+
+    #filter-input {
         width: 25;
         margin: 0 1;
     }
@@ -57,14 +79,9 @@ class InspectViewScreen(Screen):
         color: $text-muted;
     }
     
-    #content-scroll {
-        height: 100%;
-    }
+    #content-scroll { height: 1fr; }
     
-    #inspect-tree {
-        height: 100%;
-        border: none;
-    }
+    #inspect-tree { height: 100%; border: none; }
     
     #json-view {
         height: 100%;
@@ -76,14 +93,13 @@ class InspectViewScreen(Screen):
         display: none;
     }
     
-    Footer {
-        height: 1;
-    }
+    Footer { height: 1; dock: bottom; }
     """
     
     BINDINGS = [
         Binding("escape", "dismiss", "Back"),
         Binding("/", "focus_search", "Search"),
+        Binding("\\", "focus_filter", "Filter"),
         Binding("n", "next_match", "Next"),
         Binding("p", "prev_match", "Previous"),
         Binding("c", "copy_path", "Copy Path"),
@@ -96,6 +112,7 @@ class InspectViewScreen(Screen):
     
     # Reactive properties
     search_term = reactive("")
+    filter_term = reactive("")
     view_mode = reactive("tree")  # "tree" or "json"
     current_match_index = reactive(0)
     total_matches = reactive(0)
@@ -113,7 +130,8 @@ class InspectViewScreen(Screen):
         # Compact header
         with Horizontal(id="inspect-header"):
             yield Label(f"🔍 {self.container.name[:30]}", id="container-title")
-            yield Input(placeholder="Search...", id="search-input")
+            yield Input(placeholder="Search", id="search-input", classes="search-input")
+            yield Input(placeholder="Filter", id="filter-input", classes="filter-input")
             yield Label("", id="match-status")
             yield Label(f"{self.view_mode[:4].upper()}", id="view-mode")
             yield Label("", id="inspect-stats")
@@ -152,7 +170,9 @@ class InspectViewScreen(Screen):
             return
         
         self.inspect_data = data
-        self.flattened_data = self.flatten_json(self.inspect_data)
+        # Apply filter to compute the view data if any
+        view_data = self.apply_filter(self.inspect_data) if self.filter_term else self.inspect_data
+        self.flattened_data = self.flatten_json(view_data)
         
         if self.view_mode == "tree":
             self.build_tree()
@@ -188,26 +208,70 @@ class InspectViewScreen(Screen):
         """Build tree view of inspect data."""
         tree = self.query_one("#inspect-tree", Tree)
         tree.clear()
-        
-        def add_node(parent_node, data: Any, key: str = ""):
+        self._path_to_node = {}
+
+        data = self.apply_filter(self.inspect_data) if self.filter_term else self.inspect_data
+
+        def highlight_str(s: str) -> Text:
+            if not self.search_term:
+                return Text(s)
+            pattern = re.compile(re.escape(self.search_term), re.IGNORECASE)
+            out = Text()
+            idx = 0
+            for m in pattern.finditer(s):
+                if m.start() > idx:
+                    out.append(s[idx:m.start()])
+                out.append(s[m.start():m.end()], style="reverse yellow")
+                idx = m.end()
+            out.append(s[idx:])
+            return out
+
+        def highlight_parts(key_text: str, value_text: str, value_style: str) -> Text:
+            # Build a Text label with highlighting for both key and value
+            label = Text()
+            if self.search_term:
+                label += highlight_str(f"{key_text}: ")
+                # For value, split and highlight
+                val_high = highlight_str(value_text)
+                val_high.stylize(value_style)
+                label += val_high
+            else:
+                label.append(f"{key_text}: ", style="bold")
+                label.append(value_text, style=value_style)
+            return label
+
+        def add_node(parent_node, data: Any, key: str = "", parent_path: str = ""):
             """Recursively add nodes to tree."""
+            def make_path(base: str, k: str) -> str:
+                if base:
+                    if k.startswith("["):
+                        return f"{base}{k}"
+                    return f"{base}.{k}"
+                return k
+
             if isinstance(data, dict):
                 for k, v in data.items():
                     if isinstance(v, (dict, list)):
                         # Add expandable node
                         if isinstance(v, dict):
-                            label = f"📁 {k} ({len(v)} items)"
+                            raw_label = f"📁 {k} ({len(v)} items)"
                         else:
-                            label = f"📋 {k} [{len(v)} items]"
-                        
-                        child = parent_node.add(label, expand=False)
-                        add_node(child, v, k)
+                            raw_label = f"📋 {k} [{len(v)} items]"
+
+                        child = parent_node.add(highlight_str(raw_label) if self.search_term else raw_label, expand=False)
+                        full_path = make_path(parent_path, k)
+                        try:
+                            child.data = full_path
+                        except Exception:
+                            pass
+                        self._path_to_node[full_path] = child
+                        add_node(child, v, k, full_path)
                     else:
                         # Add leaf node with value
                         value_str = str(v)
                         if len(value_str) > 100:
                             value_str = value_str[:97] + "..."
-                        
+
                         # Color code based on type
                         if isinstance(v, bool):
                             style = "cyan"
@@ -217,33 +281,45 @@ class InspectViewScreen(Screen):
                             style = "dim"
                         else:
                             style = "green"
-                        
-                        label = Text.assemble(
-                            (f"{k}: ", "bold"),
-                            (value_str, style)
-                        )
-                        parent_node.add_leaf(label)
-            
+
+                        lbl = highlight_parts(k, value_str, style)
+                        leaf = parent_node.add_leaf(lbl)
+                        full_path = make_path(parent_path, k)
+                        try:
+                            leaf.data = full_path
+                        except Exception:
+                            pass
+                        self._path_to_node[full_path] = leaf
+
             elif isinstance(data, list):
                 for i, item in enumerate(data):
                     if isinstance(item, (dict, list)):
-                        label = f"[{i}]"
-                        child = parent_node.add(label, expand=False)
-                        add_node(child, item, str(i))
+                        raw_label = f"[{i}]"
+                        child = parent_node.add(highlight_str(raw_label) if self.search_term else raw_label, expand=False)
+                        full_path = make_path(parent_path, f"[{i}]")
+                        try:
+                            child.data = full_path
+                        except Exception:
+                            pass
+                        self._path_to_node[full_path] = child
+                        add_node(child, item, str(i), full_path)
                     else:
                         value_str = str(item)
                         if len(value_str) > 100:
                             value_str = value_str[:97] + "..."
-                        
-                        label = Text.assemble(
-                            (f"[{i}]: ", "bold"),
-                            (value_str, "green")
-                        )
-                        parent_node.add_leaf(label)
+
+                        lbl = highlight_parts(f"[{i}]", value_str, "green")
+                        leaf = parent_node.add_leaf(lbl)
+                        full_path = make_path(parent_path, f"[{i}]")
+                        try:
+                            leaf.data = full_path
+                        except Exception:
+                            pass
+                        self._path_to_node[full_path] = leaf
         
         # Build the tree
         tree.root.expand()
-        add_node(tree.root, self.inspect_data)
+        add_node(tree.root, data, parent_path="")
         
         # Apply search highlighting if needed
         if self.search_term:
@@ -258,15 +334,17 @@ class InspectViewScreen(Screen):
         tree_widget.add_class("hidden")
         json_widget.remove_class("hidden")
         
+        # Use filtered data if filter is active
+        data = self.apply_filter(self.inspect_data) if self.filter_term else self.inspect_data
         # Format JSON with syntax highlighting
         if self.search_term:
             # Highlight search terms in JSON
-            json_str = json.dumps(self.inspect_data, indent=2)
+            json_str = json.dumps(data, indent=2)
             highlighted = self.highlight_json_search(json_str)
             json_widget.update(highlighted)
         else:
             # Use Rich's JSON rendering
-            json_widget.update(JSON.from_data(self.inspect_data))
+            json_widget.update(JSON.from_data(data))
     
     def highlight_json_search(self, json_str: str) -> Text:
         """Highlight search terms in JSON string."""
@@ -307,7 +385,9 @@ class InspectViewScreen(Screen):
         
         search_lower = self.search_term.lower()
         
-        for path, value in self.flattened_data:
+        # Use filtered flattened data if filter active
+        view_data = self.flattened_data
+        for path, value in view_data:
             # Search in both path and value
             if search_lower in path.lower() or search_lower in str(value).lower():
                 self.matches.append((path, value))
@@ -351,12 +431,29 @@ class InspectViewScreen(Screen):
             match_label.update("")
     
     def action_dismiss(self) -> None:
-        """Go back to main screen."""
-        self.app.pop_screen()
+        """Clear filters/search or go back to main screen."""
+        if self.search_term or self.filter_term:
+            # Clear and refresh
+            self.search_term = ""
+            self.filter_term = ""
+            # Recompute flattened data
+            self.flattened_data = self.flatten_json(self.inspect_data)
+            if self.view_mode == "tree":
+                self.build_tree()
+            else:
+                self.show_json()
+            self.update_match_status()
+            self.update_stats()
+        else:
+            self.app.pop_screen()
     
     def action_focus_search(self) -> None:
         """Focus search input."""
         self.query_one("#search-input", Input).focus()
+    
+    def action_focus_filter(self) -> None:
+        """Focus filter input."""
+        self.query_one("#filter-input", Input).focus()
     
     def action_next_match(self) -> None:
         """Go to next match."""
@@ -379,8 +476,44 @@ class InspectViewScreen(Screen):
         
         # In tree view, expand path to match
         if self.view_mode == "tree":
-            # This would require tree navigation logic
-            pass
+            try:
+                tree = self.query_one("#inspect-tree", Tree)
+                node = self._path_to_node.get(path)
+                if node is not None:
+                    # Expand parents up to root
+                    parent = getattr(node, "parent", None)
+                    while parent is not None:
+                        try:
+                            parent.expand()
+                        except Exception:
+                            pass
+                        parent = getattr(parent, "parent", None)
+                    # Select and try to scroll into view using node.id for compatibility
+                    try:
+                        node_id = getattr(node, "id", None)
+                        if node_id is not None:
+                            try:
+                                tree.select_node(node_id)  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                            try:
+                                tree.scroll_to_node(node_id)  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                        else:
+                            # Fallback: attempt with node reference
+                            try:
+                                tree.select_node(node)  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                            try:
+                                tree.scroll_to_node(node)  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         
         self.update_match_status()
         self.app.notify(f"Match: {path} = {value}", timeout=2)
@@ -439,8 +572,67 @@ class InspectViewScreen(Screen):
         """Handle search input change."""
         self.search_term = event.value
         self.find_matches()
-        
         if self.view_mode == "tree":
             self.build_tree()  # Rebuild with highlighting
         else:
             self.show_json()  # Refresh with highlighting
+
+    @on(Input.Changed, "#filter-input")
+    def on_filter_changed(self, event: Input.Changed) -> None:
+        """Handle filter input change."""
+        self.filter_term = event.value
+        # Recompute flattened data based on filter
+        view_data = self.apply_filter(self.inspect_data) if self.filter_term else self.inspect_data
+        self.flattened_data = self.flatten_json(view_data)
+        self.find_matches()
+        if self.view_mode == "tree":
+            self.build_tree()
+        else:
+            self.show_json()
+
+    def apply_filter(self, data: Any) -> Any:
+        """Return a pruned copy of data that keeps only nodes whose key or value contain the filter term.
+
+        - Matching is case-insensitive substring on keys and primitive values.
+        - Containers (dict/list) are included if any descendant matches.
+        """
+        term = (self.filter_term or "").lower()
+        if not term:
+            return data
+
+        def match_value(v: Any) -> bool:
+            if isinstance(v, (dict, list)):
+                return False
+            try:
+                return term in str(v).lower()
+            except Exception:
+                return False
+
+        def prune(obj: Any, key_name: Optional[str] = None) -> Optional[Any]:
+            # If key itself matches, keep entire subtree
+            if key_name and term in key_name.lower():
+                return obj
+            if isinstance(obj, dict):
+                out = {}
+                for k, v in obj.items():
+                    pruned = prune(v, str(k))
+                    if pruned is not None:
+                        out[k] = pruned
+                return out if out else None
+            if isinstance(obj, list):
+                out_list = []
+                for idx, item in enumerate(obj):
+                    pruned = prune(item, f"[{idx}]")
+                    if pruned is not None:
+                        out_list.append(pruned)
+                return out_list if out_list else None
+            return obj if match_value(obj) else None
+
+        pruned = prune(data)
+        # If nothing matched, return empty of same type
+        if pruned is None:
+            if isinstance(data, dict):
+                return {}
+            if isinstance(data, list):
+                return []
+        return pruned
