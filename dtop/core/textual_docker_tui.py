@@ -180,11 +180,12 @@ class DockerTUIApp(App):
     }
     
     #filter-bar {
-        height: 1;
+        height: 2;
         background: $panel;
         padding: 0 1;
         border-bottom: solid $primary;
         dock: top;
+        content-align: left middle;
     }
 
     .search-input {
@@ -260,13 +261,15 @@ class DockerTUIApp(App):
     
     #connection-status {
         text-align: right;
-        width: 20;
-        margin: 0 0 0 1;
+        width: auto;
+        margin: 0 1;
+        color: $text-muted;
     }
     
     Footer {
         background: $primary;
         height: 1;
+        dock: bottom;
     }
     
     Notification {
@@ -938,13 +941,24 @@ class DockerTUIApp(App):
     def on_filter_changed(self, event: Input.Changed) -> None:
         """Handle filter input change."""
         self.filter_text = event.value
-        asyncio.create_task(self.refresh_containers())
+        # Apply filter/sort locally against the current list to keep typing snappy
+        async def _apply_local():
+            try:
+                await self.apply_filter_and_sort()
+                await self.update_table()
+            except Exception:
+                # Fallback to full refresh if something goes wrong
+                await self.refresh_containers()
+        asyncio.create_task(_apply_local())
 
     @on(Input.Changed, "#search-input")
     def on_search_changed(self, event: Input.Changed) -> None:
         """Handle search input change for containers list."""
         self.search_text = event.value
         self._compute_search_matches()
+        # Auto-jump to the first match for more responsive UX
+        if self._search_matches and self.current_match_index >= 0:
+            self._jump_to_current_match()
 
     @on(Input.Submitted, "#search-input")
     def on_search_submitted(self, event: Input.Submitted) -> None:
