@@ -39,6 +39,289 @@ class ContainerInfo:
     stats: Dict[str, Any]
 
 
+class ContainerViewHeader(Container):
+    """Custom header widget for container view."""
+    
+    DEFAULT_CSS = """
+    ContainerViewHeader {
+        height: auto;
+        min-height: 3;
+        background: $panel;
+        border-bottom: solid $primary;
+        dock: top;
+        padding: 0 1;
+    }
+    
+    #header-content {
+        height: auto;
+        width: 100%;
+    }
+    
+    #header-top {
+        height: 1;
+        layout: horizontal;
+        width: 100%;
+        margin: 0 0 1 0;
+    }
+    
+    #header-bottom {
+        height: 1;
+        layout: horizontal;
+        width: 100%;
+    }
+    
+    #app-title {
+        text-style: bold;
+        width: auto;
+    }
+    
+    #container-count {
+        width: auto;
+        margin: 0 0 0 2;
+    }
+    
+    #connection-indicator {
+        width: auto;
+        margin: 0 0 0 1;
+    }
+    
+    #search-input {
+        width: 20;
+        margin: 0 1 0 0;
+    }
+    
+    #filter-input {
+        width: 20;
+        margin: 0 1 0 0;
+    }
+    
+    #status-filter {
+        width: 15;
+        margin: 0 1 0 0;
+    }
+    
+    #search-status {
+        width: auto;
+        margin: 0 1 0 0;
+    }
+    
+    #filter-indicator {
+        width: auto;
+        margin: 0 1 0 0;
+    }
+    
+    .spacer {
+        width: 1fr;
+    }
+    """
+    
+    def __init__(self, app_instance=None):
+        super().__init__()
+        self.app_instance = app_instance
+    
+    def compose(self) -> ComposeResult:
+        """Compose the header UI."""
+        with Vertical(id="header-content"):
+            # Top row: Title and status
+            with Horizontal(id="header-top"):
+                yield Label("Docker TUI", id="app-title")
+                yield Label("Containers: 0/0", id="container-count")
+                yield Static("", classes="spacer")  # Spacer to push connection to right
+                yield Label("Connected", id="connection-indicator")
+            
+            # Bottom row: Search and filter controls
+            with Horizontal(id="header-bottom"):
+                yield Input(
+                    placeholder="Search (/)",
+                    id="search-input"
+                )
+                yield Input(
+                    placeholder="Filter (\\)",
+                    id="filter-input"
+                )
+                yield Select(
+                    [("All", "all"),
+                     ("Running", "running"),
+                     ("Exited", "exited"),
+                     ("Stopped", "stopped"),
+                     ("Paused", "paused"),
+                     ("Created", "created"),
+                     ("Restarting", "restarting"),
+                     ("Removing", "removing"),
+                     ("Dead", "dead")],
+                    prompt="Status",
+                    value="all",
+                    id="status-filter"
+                )
+                yield Label("", id="search-status")
+                yield Label("", id="filter-indicator")
+    
+    def update_counts(self, total: int, filtered: int, running: int) -> None:
+        """Update container counts."""
+        try:
+            count_label = self.query_one("#container-count", Label)
+            if filtered < total:
+                count_label.update(f"Containers: {filtered}/{total} (Running: {running})")
+            else:
+                count_label.update(f"Containers: {total} (Running: {running})")
+        except Exception:
+            pass
+    
+    def update_connection_status(self, connected: bool, message: str = "") -> None:
+        """Update connection status indicator."""
+        try:
+            status_label = self.query_one("#connection-indicator", Label)
+            if connected:
+                status_label.update("✓ Connected")
+                status_label.styles.color = "green"
+            else:
+                status_label.update(f"✗ {message or 'Disconnected'}")
+                status_label.styles.color = "red"
+        except Exception:
+            pass
+    
+    def update_search_status(self, current: int, total: int) -> None:
+        """Update search match status."""
+        try:
+            search_label = self.query_one("#search-status", Label)
+            if total > 0:
+                search_label.update(f"Match {current+1}/{total}")
+            else:
+                search_label.update("")
+        except Exception:
+            pass
+    
+    def update_filter_indicator(self, active: bool, text: str = "") -> None:
+        """Update filter indicator."""
+        try:
+            filter_label = self.query_one("#filter-indicator", Label)
+            if active and text:
+                filter_label.update(f"[Filter: {text[:10]}...]" if len(text) > 10 else f"[{text}]")
+            else:
+                filter_label.update("")
+        except Exception:
+            pass
+
+
+class ContainerViewFooter(Container):
+    """Custom footer widget for container view."""
+    
+    DEFAULT_CSS = """
+    ContainerViewFooter {
+        height: 2;
+        background: $primary;
+        border-top: solid $primary;
+        dock: bottom;
+    }
+    
+    #footer-top {
+        height: 1;
+        layout: horizontal;
+        padding: 0 1;
+    }
+    
+    #footer-bottom {
+        height: 1;
+        layout: horizontal;
+        padding: 0 1;
+    }
+    
+    .footer-key {
+        margin: 0 1 0 0;
+        text-style: bold;
+    }
+    
+    .footer-desc {
+        margin: 0 2 0 0;
+    }
+    
+    #selection-info {
+        width: auto;
+        margin: 0 0 0 1;
+    }
+    
+    #refresh-indicator {
+        width: auto;
+        margin: 0 0 0 1;
+    }
+    
+    .spacer {
+        width: 1fr;
+    }
+    """
+    
+    def __init__(self, app_instance=None):
+        super().__init__()
+        self.app_instance = app_instance
+        self.last_refresh = time.time()
+    
+    def compose(self) -> ComposeResult:
+        """Compose the footer UI."""
+        with Container(id="footer-container"):
+            # Top row: Primary key bindings
+            with Horizontal(id="footer-top"):
+                yield Label("Enter", classes="footer-key")
+                yield Label("Actions", classes="footer-desc")
+                yield Label("L", classes="footer-key")
+                yield Label("Logs", classes="footer-desc")
+                yield Label("I", classes="footer-key")
+                yield Label("Inspect", classes="footer-desc")
+                yield Label("R", classes="footer-key")
+                yield Label("Refresh", classes="footer-desc")
+                yield Label("?", classes="footer-key")
+                yield Label("Help", classes="footer-desc")
+                yield Label("Q", classes="footer-key")
+                yield Label("Quit", classes="footer-desc")
+                yield Static("", classes="spacer")  # Spacer
+                yield Label("", id="selection-info")
+            
+            # Bottom row: Status and secondary bindings
+            with Horizontal(id="footer-bottom"):
+                yield Label("/", classes="footer-key")
+                yield Label("Search", classes="footer-desc")
+                yield Label("\\", classes="footer-key")
+                yield Label("Filter", classes="footer-desc")
+                yield Label("ESC", classes="footer-key")
+                yield Label("Clear", classes="footer-desc")
+                yield Label("C", classes="footer-key")
+                yield Label("Columns", classes="footer-desc")
+                yield Label("D", classes="footer-key")
+                yield Label("Theme", classes="footer-desc")
+                yield Static("", classes="spacer")  # Spacer
+                yield Label("⟳ Auto: 2s", id="refresh-indicator")
+    
+    def update_selection(self, container_name: str = "", container_status: str = "") -> None:
+        """Update selected container info."""
+        try:
+            selection_label = self.query_one("#selection-info", Label)
+            if container_name:
+                # Truncate long names
+                display_name = container_name[:20] + "..." if len(container_name) > 20 else container_name
+                selection_label.update(f"[{container_status}] {display_name}")
+            else:
+                selection_label.update("")
+        except Exception:
+            pass
+    
+    def update_refresh_status(self, interval: float, last_refresh: float) -> None:
+        """Update refresh indicator."""
+        try:
+            refresh_label = self.query_one("#refresh-indicator", Label)
+            time_since = time.time() - last_refresh
+            if time_since < 1:
+                refresh_label.update(f"↻ Just refreshed")
+            else:
+                refresh_label.update(f"↻ Auto: {interval}s")
+        except Exception:
+            pass
+    
+    def set_context_keys(self, context: str = "default") -> None:
+        """Update key bindings based on context."""
+        # This could show different keys based on what's selected
+        # For now, keeping the default set
+        pass
+
+
 class ContainerActionModal(ModalScreen):
     """Modal dialog for container actions."""
     
@@ -168,65 +451,45 @@ class DockerTUIApp(App):
         height: 100%;
     }
     
-    #header-bar {
-        height: 1;
-        background: $primary;
-        color: $text;
-        padding: 0 1;
-    }
-    
-    #app-title {
-        text-style: bold;
-    }
-    
     #filter-bar {
-        height: 2;
-        background: $panel;
-        padding: 0 1;
-        border-bottom: solid $primary;
+        /* Overlay header */
         dock: top;
-        content-align: left middle;
-    }
-
-    .search-input {
-        width: 20;
-        height: 1;
-        margin: 0;
+        layer: above;
+        height: 4;
+        width: 100%;
+        background: $panel;
         padding: 0;
-        border: none;
+        border-bottom: solid $primary;
     }
 
     #search-input {
         width: 20;
-        margin: 0 1;
+        height: 3;
+        padding: 0;
+        margin: 0 0;
     }
 
     #filter-input {
         width: 20;
-        margin: 0 1;
-    }
-
-    .filter-input {
-        width: 20;
-        height: 1;
-        margin: 0;
+        height: 3;
         padding: 0;
-        border: none;
+        margin: 0 0;
     }
     
     #status-filter {
         width: 15;
-        height: 1;
-        margin: 0 1;
+        height: 3;
+        margin: 0 0;
     }
 
     #match-status {
-        width: 14;
-        color: $text-muted;
+        width: auto;
+        margin: 0 1;
     }
     
-    #stats-bar {
-        display: none;  /* Hide stats bar to save space */
+    #connection-status {
+        width: auto;
+        margin: 0 1;
     }
     
     #container-table {
@@ -252,30 +515,6 @@ class DockerTUIApp(App):
     
     DataTable > .datatable--even-row {
         background: $panel;
-    }
-    
-    .status-indicator {
-        margin: 0 0 0 1;
-        width: auto;
-    }
-    
-    .compact-switch {
-        width: 3;
-        height: 1;
-        margin: 0 1 0 0;
-    }
-    
-    #connection-status {
-        text-align: right;
-        width: auto;
-        margin: 0 1;
-        color: $text-muted;
-    }
-    
-    Footer {
-        background: $primary;
-        height: 1;
-        dock: bottom;
     }
     
     Notification {
@@ -315,6 +554,7 @@ class DockerTUIApp(App):
     normalize_logs = reactive(True)
     wrap_lines = reactive(True)
     refresh_interval = reactive(2.0)
+    show_header = reactive(False)  # Header overlay visibility
     
     def __init__(self):
         super().__init__()
@@ -432,10 +672,15 @@ class DockerTUIApp(App):
     
     def compose(self) -> ComposeResult:
         """Create the main UI."""
-        # Header bar docked at top (like logs)
+        # Main container with table
+        with Vertical(id="main-container"):
+            # Container table fills space
+            yield DataTable(id="container-table", cursor_type="row", zebra_stripes=True)
+            
+        # Overlay header (hidden initially)
         with Horizontal(id="filter-bar"):
-            yield Input(placeholder="Search", id="search-input", classes="search-input")
-            yield Input(placeholder="Filter", id="filter-input", classes="filter-input")
+            yield Input(placeholder="Search", id="search-input")
+            yield Input(placeholder="Filter", id="filter-input")
             yield Select(
                 [("All", "all"), 
                  ("Running", "running"), 
@@ -453,12 +698,9 @@ class DockerTUIApp(App):
             yield Label("", id="match-status")
             yield Label("", id="connection-status")
 
-        # Container table fills remaining space
-        table = DataTable(id="container-table", cursor_type="row", zebra_stripes=True)
-        yield table
-
-        # Footer docked at bottom
-        yield Footer()
+        # Keep custom footer
+        self.footer = ContainerViewFooter(self)
+        yield self.footer
     
     async def on_mount(self) -> None:
         """Initialize when app is mounted."""
@@ -466,6 +708,9 @@ class DockerTUIApp(App):
         await self.setup_table()
         await self.start_stats_collection()
         await self.start_refresh_timers()
+        
+        # Hide header initially
+        self.query_one("#filter-bar").visible = False
         
         # Focus the table for keyboard navigation
         table = self.query_one("#container-table", DataTable)
@@ -479,16 +724,28 @@ class DockerTUIApp(App):
         except Exception:
             pass
     
+    def watch_show_header(self, show: bool) -> None:
+        """Toggle header visibility."""
+        header = self.query_one("#filter-bar")
+        header.visible = show
+    
+    def on_click(self, event) -> None:
+        """Handle clicks to close header when clicking outside."""
+        if self.show_header:
+            # Simple check: if click is below the header area (y > 4 since header height is 4)
+            if event.y > 4:
+                self.show_header = False
+    
     async def connect_docker(self) -> None:
         """Connect to Docker daemon."""
         try:
             self.docker_client = docker.from_env()
             status = self.query_one("#connection-status", Label)
-            status.update("✅ Connected")
+            status.update("✓ Connected")
             await self.refresh_containers()
         except docker.errors.DockerException as e:
             status = self.query_one("#connection-status", Label)
-            status.update("❌ Disconnected")
+            status.update("✗ Disconnected")
             self.notify(f"Docker connection failed: {e}", severity="error", timeout=10)
     
     async def setup_table(self) -> None:
@@ -537,6 +794,10 @@ class DockerTUIApp(App):
             
             # Update table display
             await self.update_table()
+            
+            # Update footer refresh status if exists
+            if hasattr(self, 'footer'):
+                self.footer.update_refresh_status(self.refresh_interval, self.last_refresh)
             
             # Update stats manager with running containers
             running_ids = [c.id for c in self.containers if c.status == 'running']
@@ -978,10 +1239,19 @@ class DockerTUIApp(App):
         """Handle row selection."""
         if event.row_key:
             self.selected_container_id = event.row_key.value
+            # Update footer with selection info if exists
+            if hasattr(self, 'footer'):
+                container = self.container_map.get(event.row_key.value)
+                if container:
+                    self.footer.update_selection(container.name, container.status)
     
     @on(DataTable.RowSelected)
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle row double-click or Enter key."""
+        # Hide header when user actively selects a row
+        if self.show_header:
+            self.show_header = False
+        
         if event.row_key:
             container = self.container_map.get(event.row_key.value)
             if container:
@@ -1018,9 +1288,22 @@ class DockerTUIApp(App):
 
     @on(Input.Submitted, "#search-input")
     def on_search_submitted(self, event: Input.Submitted) -> None:
-        """Jump to first match when submitting search."""
+        """Apply search and hide header when submitting."""
+        self.search_text = event.value
+        self._compute_search_matches()
         if self._search_matches:
             self._jump_to_current_match()
+        # Hide header after applying
+        self.show_header = False
+        asyncio.create_task(self.update_table())
+    
+    @on(Input.Submitted, "#filter-input")  
+    def on_filter_submitted(self, event: Input.Submitted) -> None:
+        """Apply filter and hide header when submitting."""
+        self.filter_text = event.value
+        # Hide header after applying
+        self.show_header = False
+        asyncio.create_task(self.refresh_containers())
 
     def action_search_next(self) -> None:
         """Move to next container search match and select it."""
@@ -1116,18 +1399,21 @@ class DockerTUIApp(App):
             self.push_screen(InspectViewScreen(container))
     
     def action_focus_filter(self) -> None:
-        """Focus filter input."""
+        """Show header and focus filter input."""
+        self.show_header = True
         self.query_one("#filter-input", Input).focus()
 
     def action_focus_search(self) -> None:
-        """Focus search input."""
+        """Show header and focus search input."""
+        self.show_header = True
         self.query_one("#search-input", Input).focus()
     
     def action_clear_filter(self) -> None:
-        """Clear filter."""
+        """Clear filter and hide header."""
         filter_input = self.query_one("#filter-input", Input)
         filter_input.value = ""
         self.filter_text = ""
+        
         # Reset status filter to all
         try:
             status_select = self.query_one("#status-filter", Select)
@@ -1135,6 +1421,7 @@ class DockerTUIApp(App):
         except Exception:
             pass
         self.status_filter = "all"
+        
         # Also clear search if present
         try:
             search_input = self.query_one("#search-input", Input)
@@ -1143,6 +1430,10 @@ class DockerTUIApp(App):
             pass
         self.search_text = ""
         self._compute_search_matches()
+        
+        # Hide header
+        self.show_header = False
+        
         asyncio.create_task(self.refresh_containers())
     
     def action_toggle_normalize(self) -> None:
