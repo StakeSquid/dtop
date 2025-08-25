@@ -690,6 +690,42 @@ class DockerTUIApp(App):
                 except Exception:
                     pass
     
+    def _highlight_text(self, text: str, base_style: str = "") -> Text:
+        """Highlight search text within a string."""
+        if not self.search_text or not text:
+            return Text(text, style=base_style) if base_style else Text(text)
+        
+        search_lower = self.search_text.lower()
+        text_lower = text.lower()
+        
+        if search_lower not in text_lower:
+            return Text(text, style=base_style) if base_style else Text(text)
+        
+        # Create a Text object with highlighting
+        result = Text()
+        last_end = 0
+        
+        while True:
+            start = text_lower.find(search_lower, last_end)
+            if start == -1:
+                # Add remaining text
+                if last_end < len(text):
+                    result.append(text[last_end:], style=base_style)
+                break
+            
+            # Add text before match
+            if start > last_end:
+                result.append(text[last_end:start], style=base_style)
+            
+            # Add highlighted match
+            end = start + len(self.search_text)
+            highlight_style = f"{base_style} bold reverse" if base_style else "bold reverse"
+            result.append(text[start:end], style=highlight_style)
+            
+            last_end = end
+        
+        return result
+    
     def build_row_data(self, container) -> List:
         """Build row data for a container."""
         row_data = []
@@ -699,21 +735,21 @@ class DockerTUIApp(App):
             col_name = col['name']
             
             if col_name == 'NAME':
-                row_data.append(container.name)
+                row_data.append(self._highlight_text(container.name))
             elif col_name == 'IMAGE':
                 image = container.image.tags[0] if container.image.tags else '<none>'
-                row_data.append(image)
+                row_data.append(self._highlight_text(image))
             elif col_name == 'STATUS':
                 status = container.status
-                # Add color to status
+                # Determine base color for status
                 if "running" in status.lower():
-                    row_data.append(Text(status, style="green"))
+                    row_data.append(self._highlight_text(status, "green"))
                 elif "exited" in status.lower() or "stopped" in status.lower():
-                    row_data.append(Text(status, style="red"))
+                    row_data.append(self._highlight_text(status, "red"))
                 elif "paused" in status.lower():
-                    row_data.append(Text(status, style="yellow"))
+                    row_data.append(self._highlight_text(status, "yellow"))
                 else:
-                    row_data.append(status)
+                    row_data.append(self._highlight_text(status))
             elif col_name == 'CPU%':
                 cpu_pct = stats.get('cpu', 0)
                 row_data.append(f"{cpu_pct:.1f}%")
@@ -732,10 +768,10 @@ class DockerTUIApp(App):
                 row_data.append(text)
             elif col_name == 'CREATED AT':
                 created = format_datetime(container.attrs.get('Created', ''))
-                row_data.append(created)
+                row_data.append(self._highlight_text(created))
             elif col_name == 'UPTIME':
                 uptime = self.calculate_uptime(container)
-                row_data.append(uptime)
+                row_data.append(self._highlight_text(uptime))
             else:
                 row_data.append("")
         
@@ -946,6 +982,8 @@ class DockerTUIApp(App):
         """Handle search input change for containers list."""
         self.search_text = event.value
         self._compute_search_matches()
+        # Update table to show highlighting
+        asyncio.create_task(self.update_table())
         # Auto-jump to the first match for more responsive UX
         if self._search_matches and self.current_match_index >= 0:
             self._jump_to_current_match()
