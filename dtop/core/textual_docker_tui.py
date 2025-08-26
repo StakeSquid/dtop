@@ -1980,9 +1980,9 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
     RecreateContainerModal { align: center middle; }
     
     #recreate-dialog {
-        width: 80;
-        height: auto;
-        max-height: 35;
+        width: 90;
+        height: 80%;
+        max-height: 40;
         padding: 1 2;
         background: $surface;
         border: thick $primary;
@@ -2007,31 +2007,31 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
         height: 1;
     }
     
-    #path-section {
+    #path-display {
         height: auto;
-        margin: 1 0;
-    }
-    
-    #path-input {
-        width: 100%;
         margin: 0 0 1 0;
     }
     
-    #compose-file-select {
-        width: 100%;
+    #current-path {
+        color: $primary;
+        text-style: bold;
+    }
+    
+    #file-browser {
+        height: 1fr;
+        min-height: 10;
+        background: $panel;
+        border: solid $primary;
         margin: 0 0 1 0;
-        display: none;
     }
     
-    #compose-options {
-        height: auto;
-        margin: 1 0;
+    #file-table {
+        height: 100%;
     }
     
-    .option-row {
-        layout: horizontal;
-        height: auto;
-        margin: 0 0 0 0;
+    #compose-status {
+        height: 1;
+        margin: 0 0 1 0;
     }
     
     #actions {
@@ -2055,6 +2055,8 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
     
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "select_item", "Select", show=False),
+        Binding("backspace", "go_up", "Parent Dir", show=False),
     ]
     
     def __init__(self, container):
@@ -2063,8 +2065,8 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
         self.current_path = os.getcwd()
         self.service_name = None
         self.compose_project = None
-        self.selected_compose_file = None
-        self.yaml_files = []
+        self.selected_file_path = None
+        self.file_entries = []
         self._detect_compose_info()
     
     def _detect_compose_info(self):
@@ -2084,9 +2086,8 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
     
     def on_mount(self) -> None:
         """Initialize the dialog when mounted."""
-        # Validate the initial path (compose working directory or current directory)
-        if self.current_path:
-            self._validate_and_check_path(self.current_path)
+        # Load the initial directory
+        self._load_directory(self.current_path)
     
     def compose(self) -> ComposeResult:
         """Create the recreate dialog UI."""
@@ -2104,120 +2105,141 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                 if self.service_name:
                     yield Label(f"Service Name: {self.service_name}", classes="info-label")
             
-            # Path input section
-            with Container(id="path-section"):
-                yield Label("Docker Compose Directory:", classes="info-label")
-                yield Input(
-                    value=self.current_path,
-                    id="path-input",
-                    placeholder="Enter path to docker-compose.yml (leave empty for simple recreate)"
-                )
-                # Dropdown for YAML files (hidden by default)
-                yield Select(
-                    [("No file selected", "")],  # Provide a default option
-                    prompt="Select a compose file",
-                    id="compose-file-select",
-                    allow_blank=True
-                )
-                yield Label("Note: Leave empty to recreate without docker-compose", classes="info-label")
+            # Current path display
+            with Container(id="path-display"):
+                yield Label("📂 Current Directory:", classes="info-label")
+                yield Label(self.current_path, id="current-path")
             
-            # Compose detection status
+            # File browser
+            with ScrollableContainer(id="file-browser"):
+                yield DataTable(id="file-table", cursor_type="row", zebra_stripes=True)
+            
+            # Status
             yield Label("", id="compose-status")
             
             # Warning
             yield Label(
-                "⚠️ This will stop, remove and recreate the container",
+                "⚠️ Select a docker-compose file or use Simple Recreate",
                 id="warning-text"
             )
             
             # Action buttons
             with Container(id="actions"):
-                yield Button("Recreate with Compose", id="recreate", classes="action-button", variant="error")
+                yield Button("Recreate with Selected", id="recreate", classes="action-button", variant="error")
                 yield Button("Simple Recreate", id="simple-recreate", classes="action-button", variant="warning")
                 yield Button("Cancel", id="cancel", classes="action-button", variant="default")
     
-    def _validate_and_check_path(self, path: str) -> None:
-        """Validate path and check for compose files."""
-        status_label = self.query_one("#compose-status", Label)
-        select_widget = self.query_one("#compose-file-select", Select)
-        
-        # Reset selection
-        self.selected_compose_file = None
-        self.yaml_files = []
-        
-        if not path:
-            status_label.update("")
-            select_widget.styles.display = "none"
-            return
-        
-        # Expand user path
-        path = os.path.expanduser(path)
-        
-        if not os.path.exists(path):
-            status_label.update("❌ Directory does not exist")
-            status_label.styles.color = "red"
-            select_widget.styles.display = "none"
-            return
-        
-        if not os.path.isdir(path):
-            status_label.update("❌ Path is not a directory")
-            status_label.styles.color = "red"
-            select_widget.styles.display = "none"
-            return
-        
-        # Check for standard compose files
-        compose_files = []
-        for filename in ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']:
-            file_path = os.path.join(path, filename)
-            if os.path.exists(file_path):
-                compose_files.append(filename)
-                self.selected_compose_file = filename  # Auto-select the first standard file found
-        
-        if compose_files:
-            status_label.update(f"✓ Found: {', '.join(compose_files)}")
-            status_label.styles.color = "green"
-            select_widget.styles.display = "none"  # Hide dropdown if standard files found
-        else:
-            # No standard compose files, look for all YAML files
+    def _load_directory(self, path: str) -> None:
+        """Load directory contents into the file browser."""
+        try:
+            path = os.path.expanduser(path)
+            if not os.path.exists(path):
+                path = os.getcwd()
+            
+            self.current_path = os.path.abspath(path)
+            
+            # Update current path display
+            path_label = self.query_one("#current-path", Label)
+            path_label.update(self.current_path)
+            
+            # Get directory contents
+            self.file_entries = []
+            
+            # Add parent directory option if not at root
+            if self.current_path != os.path.sep:
+                self.file_entries.append({
+                    'name': '..',
+                    'type': 'directory',
+                    'size': '-',
+                    'path': os.path.dirname(self.current_path)
+                })
+            
+            # List directory contents
             try:
-                all_files = os.listdir(path)
-                self.yaml_files = [f for f in all_files 
-                                 if f.endswith(('.yml', '.yaml')) and os.path.isfile(os.path.join(path, f))]
-                
-                if self.yaml_files:
-                    # Show dropdown with YAML files
-                    select_widget.styles.display = "block"
-                    # Add placeholder as first option
-                    select_options = [("Select a file...", "")] + [(f, f) for f in sorted(self.yaml_files)]
-                    select_widget.set_options(select_options)
-                    
-                    status_label.update(f"⚠️ No standard compose file found. {len(self.yaml_files)} YAML file(s) available")
-                    status_label.styles.color = "yellow"
-                else:
-                    status_label.update("⚠️ No docker-compose or YAML files found in directory")
-                    status_label.styles.color = "yellow"
-                    select_widget.styles.display = "none"
+                items = os.listdir(self.current_path)
+                for item in sorted(items):
+                    item_path = os.path.join(self.current_path, item)
+                    try:
+                        if os.path.isdir(item_path):
+                            # Directory
+                            self.file_entries.append({
+                                'name': f"📁 {item}",
+                                'type': 'directory',
+                                'size': '-',
+                                'path': item_path
+                            })
+                        elif item.endswith(('.yml', '.yaml')):
+                            # YAML file
+                            size = os.path.getsize(item_path)
+                            size_str = self._format_size(size)
+                            self.file_entries.append({
+                                'name': f"📄 {item}",
+                                'type': 'yaml',
+                                'size': size_str,
+                                'path': item_path
+                            })
+                    except Exception:
+                        continue  # Skip items we can't access
             except Exception as e:
-                status_label.update(f"❌ Error reading directory: {e}")
-                status_label.styles.color = "red"
-                select_widget.styles.display = "none"
+                status = self.query_one("#compose-status", Label)
+                status.update(f"❌ Error reading directory: {e}")
+                status.styles.color = "red"
+            
+            # Update the data table
+            self._update_file_table()
+            
+        except Exception as e:
+            status = self.query_one("#compose-status", Label)
+            status.update(f"❌ Error loading directory: {e}")
+            status.styles.color = "red"
     
-    @on(Input.Changed, "#path-input")
-    def on_path_changed(self, event: Input.Changed) -> None:
-        """Handle path input changes."""
-        path = event.value.strip()
-        self._validate_and_check_path(path)
+    def _format_size(self, size: int) -> str:
+        """Format file size in human-readable format."""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} TB"
     
-    @on(Select.Changed, "#compose-file-select")
-    def on_file_selected(self, event: Select.Changed) -> None:
-        """Handle YAML file selection from dropdown."""
-        if event.value and event.value != "":  # Check for non-empty selection
-            self.selected_compose_file = event.value
-            status_label = self.query_one("#compose-status", Label)
-            status_label.update(f"✓ Selected: {event.value}")
-            status_label.styles.color = "green"
-        else:
-            self.selected_compose_file = None
+    def _update_file_table(self) -> None:
+        """Update the file browser table with current entries."""
+        table = self.query_one("#file-table", DataTable)
+        table.clear(columns=True)
+        
+        # Add columns
+        table.add_column("Name", width=50)
+        table.add_column("Type", width=15)
+        table.add_column("Size", width=10)
+        
+        # Add rows
+        for entry in self.file_entries:
+            table.add_row(
+                entry['name'],
+                entry['type'],
+                entry['size'],
+                key=entry['path']
+            )
+    
+    @on(DataTable.RowSelected, "#file-table")
+    def on_file_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle file/directory selection."""
+        if event.row_key:
+            path = event.row_key.value
+            
+            # Check if it's a directory
+            if os.path.isdir(path):
+                # Navigate into directory
+                self._load_directory(path)
+                self.selected_file_path = None
+                status = self.query_one("#compose-status", Label)
+                status.update("")
+            else:
+                # File selected
+                self.selected_file_path = path
+                filename = os.path.basename(path)
+                status = self.query_one("#compose-status", Label)
+                status.update(f"✓ Selected: {filename}")
+                status.styles.color = "green"
     
     @on(Button.Pressed)
     def handle_button(self, event: Button.Pressed) -> None:
@@ -2225,22 +2247,21 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
         if event.button.id == "cancel":
             self.dismiss(None)
         elif event.button.id == "recreate":
-            path = self.query_one("#path-input", Input).value.strip()
-            if path:
-                path = os.path.expanduser(path)
-                # Use selected file if available, otherwise will auto-detect
-                compose_file = self.selected_compose_file
+            if self.selected_file_path and os.path.exists(self.selected_file_path):
+                # Use the selected file
+                compose_dir = os.path.dirname(self.selected_file_path)
+                compose_file = os.path.basename(self.selected_file_path)
                 self.dismiss({
                     'action': 'recreate-compose',
-                    'path': path,
+                    'path': compose_dir,
                     'service': self.service_name or self.container.name,
                     'compose_file': compose_file
                 })
             else:
-                # No path - do simple recreate
-                self.dismiss({
-                    'action': 'recreate-simple'
-                })
+                # No file selected - show warning
+                status = self.query_one("#compose-status", Label)
+                status.update("⚠️ Please select a docker-compose file or use Simple Recreate")
+                status.styles.color = "yellow"
         elif event.button.id == "simple-recreate":
             # Simple recreate without compose
             self.dismiss({
@@ -2250,6 +2271,34 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
     def action_cancel(self) -> None:
         """Cancel action."""
         self.dismiss(None)
+    
+    def action_select_item(self) -> None:
+        """Select the currently highlighted item in the file browser."""
+        table = self.query_one("#file-table", DataTable)
+        if table.cursor_coordinate and table.row_count > 0:
+            row_index = table.cursor_coordinate.row
+            if 0 <= row_index < len(self.file_entries):
+                entry = self.file_entries[row_index]
+                path = entry['path']
+                
+                if os.path.isdir(path):
+                    # Navigate into directory
+                    self._load_directory(path)
+                    self.selected_file_path = None
+                else:
+                    # Select file
+                    self.selected_file_path = path
+                    filename = os.path.basename(path)
+                    status = self.query_one("#compose-status", Label)
+                    status.update(f"✓ Selected: {filename}")
+                    status.styles.color = "green"
+    
+    def action_go_up(self) -> None:
+        """Navigate to parent directory."""
+        if self.current_path != os.path.sep:
+            parent = os.path.dirname(self.current_path)
+            self._load_directory(parent)
+            self.selected_file_path = None
 
 
 class ColumnSettingsModal(ModalScreen[Optional[List[Dict[str, Any]]]]):
