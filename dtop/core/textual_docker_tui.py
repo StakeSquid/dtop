@@ -1388,7 +1388,19 @@ class DockerTUIApp(App):
                 # Execute shell into container
                 await self.execute_shell_into_container(container)
             elif action == "recreate":
-                self.notify("Recreate requires docker-compose", severity="information")
+                # Show recreate dialog
+                def handle_recreate_result(result: Optional[Dict[str, Any]]) -> None:
+                    if result:
+                        if result.get('action') == 'recreate-compose':
+                            asyncio.create_task(self.execute_docker_compose_recreate(
+                                container,
+                                result['path'],
+                                result['service']
+                            ))
+                        elif result.get('action') == 'recreate-simple':
+                            asyncio.create_task(self.execute_simple_recreate(container))
+                
+                self.push_screen(RecreateContainerModal(container), handle_recreate_result)
         except Exception as e:
             self.notify(f"Action failed: {e}", severity="error")
     
@@ -1657,6 +1669,244 @@ class DockerTUIApp(App):
             
         except Exception as e:
             self.notify(f"Failed to execute shell: {e}", severity="error")
+    
+    async def execute_simple_recreate(self, container) -> None:
+        """Recreate a container without docker-compose (simple docker run)."""
+        try:
+            # Get container configuration
+            container_info = container.attrs
+            config = container_info.get('Config', {})
+            host_config = container_info.get('HostConfig', {})
+            
+            # Get image
+            image = container.image
+            image_name = image.tags[0] if image.tags else image.id
+            
+            # Store container name
+            container_name = container.name
+            
+            # Get important configurations
+            env_vars = config.get('Env', [])
+            volumes = []
+            binds = host_config.get('Binds', [])
+            ports = {}
+            
+            # Parse port bindings
+            port_bindings = host_config.get('PortBindings', {})
+            for container_port, host_ports in port_bindings.items():
+                if host_ports:
+                    for hp in host_ports:
+                        if hp.get('HostPort'):
+                            ports[container_port] = hp['HostPort']
+            
+            # Get network mode
+            network_mode = host_config.get('NetworkMode', 'default')
+            
+            # Get restart policy  
+            restart_policy = host_config.get('RestartPolicy', {})
+            restart = None
+            if restart_policy.get('Name'):
+                restart = restart_policy['Name']
+                if restart == 'on-failure' and restart_policy.get('MaximumRetryCount'):
+                    restart = f"on-failure:{restart_policy['MaximumRetryCount']}"
+            
+            # Stop and remove the container
+            self.notify(f"Stopping {container_name}...", timeout=1)
+            try:
+                container.stop(timeout=10)
+            except Exception:
+                pass  # Container might already be stopped
+            
+            self.notify(f"Removing {container_name}...", timeout=1)
+            container.remove(force=True)
+            
+            # Create new container with same config
+            self.notify(f"Creating {container_name}...", timeout=1)
+            
+            # Build docker run arguments
+            run_kwargs = {
+                'image': image_name,
+                'name': container_name,
+                'detach': True,
+                'environment': env_vars,
+            }
+            
+            # Add optional parameters
+            if binds:
+                run_kwargs['volumes'] = binds
+            if ports:
+                run_kwargs['ports'] = ports
+            if network_mode and network_mode != 'default':
+                run_kwargs['network_mode'] = network_mode
+            if restart:
+                run_kwargs['restart_policy'] = {'Name': restart}
+            
+            # Add command if present
+            cmd = config.get('Cmd')
+            if cmd:
+                run_kwargs['command'] = cmd
+            
+            # Add entrypoint if present
+            entrypoint = config.get('Entrypoint')
+            if entrypoint:
+                run_kwargs['entrypoint'] = entrypoint
+            
+            # Add working directory
+            working_dir = config.get('WorkingDir')
+            if working_dir:
+                run_kwargs['working_dir'] = working_dir
+            
+            # Add user
+            user = config.get('User')
+            if user:
+                run_kwargs['user'] = user
+            
+            # Create and start new container
+            new_container = self.docker_client.containers.run(**run_kwargs)
+            
+            self.notify(f"Successfully recreated {container_name}", severity="information")
+            
+            # Refresh the container list
+            await self.refresh_containers()
+            
+        except Exception as e:
+            self.notify(f"Failed to recreate container: {e}", severity="error")
+            # Try to clean up if something went wrong
+            try:
+                # Check if old container still exists and remove it
+                old_container = self.docker_client.containers.get(container.id)
+                old_container.remove(force=True)
+            except Exception:
+                pass
+    
+    async def execute_docker_compose_recreate(self, container, compose_path: str, service_name: str) -> None:
+        """Execute docker-compose to recreate a container."""
+        try:
+            # Validate path exists
+            if not os.path.exists(compose_path):
+                self.notify(f"Path does not exist: {compose_path}", severity="error")
+                return
+            
+            if not os.path.isdir(compose_path):
+                self.notify(f"Path is not a directory: {compose_path}", severity="error")
+                return
+            
+            # Check for docker-compose file
+            compose_file = None
+            for filename in ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']:
+                file_path = os.path.join(compose_path, filename)
+                if os.path.exists(file_path):
+                    compose_file = filename
+                    break
+            
+            if not compose_file:
+                self.notify("No docker-compose file found in directory", severity="error")
+                return
+            
+            # Check if docker-compose or docker compose is available
+            compose_cmd = None
+            try:
+                # Try docker compose (newer integrated version)
+                result = subprocess.run(
+                    ["docker", "compose", "version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if result.returncode == 0:
+                    compose_cmd = ["docker", "compose"]
+            except Exception:
+                pass
+            
+            if not compose_cmd:
+                try:
+                    # Try docker-compose (standalone version)
+                    result = subprocess.run(
+                        ["docker-compose", "version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    )
+                    if result.returncode == 0:
+                        compose_cmd = ["docker-compose"]
+                except Exception:
+                    pass
+            
+            if not compose_cmd:
+                self.notify(
+                    "Docker Compose not found. Please install docker-compose or use Docker Desktop",
+                    severity="error"
+                )
+                return
+            
+            # Build the recreate command
+            recreate_cmd = compose_cmd + [
+                "-f", os.path.join(compose_path, compose_file),
+                "up", "-d",
+                "--force-recreate",
+                "--no-deps",  # Don't recreate dependencies
+                service_name
+            ]
+            
+            # Show notification
+            self.notify(f"Recreating {service_name}...", timeout=2)
+            
+            # Execute in a worker to not block the UI
+            self._run_compose_command(recreate_cmd, compose_path, service_name)
+            
+        except Exception as e:
+            self.notify(f"Failed to recreate container: {e}", severity="error")
+    
+    def _run_compose_command_sync(self, cmd: List[str], cwd: str, service_name: str) -> None:
+        """Run docker-compose command in a separate thread (synchronous)."""
+        try:
+            # Run the command
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=60  # 60 second timeout
+            )
+            
+            if result.returncode == 0:
+                # Success
+                self.call_from_thread(
+                    self.notify,
+                    f"Successfully recreated {service_name}",
+                    severity="information"
+                )
+                # Refresh containers list
+                self.call_from_thread(asyncio.create_task, self.refresh_containers())
+            else:
+                # Command failed
+                error_msg = result.stderr or result.stdout or "Unknown error"
+                # Truncate long error messages
+                if len(error_msg) > 200:
+                    error_msg = error_msg[:200] + "..."
+                self.call_from_thread(
+                    self.notify,
+                    f"Failed to recreate {service_name}: {error_msg}",
+                    severity="error",
+                    timeout=10
+                )
+        except subprocess.TimeoutExpired:
+            self.call_from_thread(
+                self.notify,
+                f"Recreate operation timed out for {service_name}",
+                severity="error"
+            )
+        except Exception as e:
+            self.call_from_thread(
+                self.notify,
+                f"Error running docker-compose: {e}",
+                severity="error"
+            )
+    
+    @work(thread=True)
+    def _run_compose_command(self, cmd: List[str], cwd: str, service_name: str) -> None:
+        """Wrapper to run compose command in a worker thread."""
+        self._run_compose_command_sync(cmd, cwd, service_name)
 
     # -----------------------------
     # Column settings UI
@@ -1712,6 +1962,215 @@ class DockerTUIApp(App):
         if self.refresh_timer:
             self.refresh_timer.stop()
         await self.stats_manager.stop()
+
+
+class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
+    """Modal dialog for recreating a container with docker-compose."""
+    
+    CSS = """
+    RecreateContainerModal { align: center middle; }
+    
+    #recreate-dialog {
+        width: 80;
+        height: auto;
+        max-height: 30;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+    }
+    
+    #recreate-title {
+        text-align: center;
+        text-style: bold;
+        color: $primary;
+        margin: 0 0 1 0;
+        height: auto;
+    }
+    
+    #info-section {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    
+    .info-label {
+        margin: 0 0 0 0;
+        height: 1;
+    }
+    
+    #path-section {
+        height: auto;
+        margin: 1 0;
+    }
+    
+    #path-input {
+        width: 100%;
+        margin: 0 0 1 0;
+    }
+    
+    #compose-options {
+        height: auto;
+        margin: 1 0;
+    }
+    
+    .option-row {
+        layout: horizontal;
+        height: auto;
+        margin: 0 0 0 0;
+    }
+    
+    #actions {
+        layout: horizontal;
+        margin-top: 1;
+        width: 100%;
+        height: auto;
+    }
+    
+    .action-button {
+        width: 1fr;
+        margin: 0 1 0 0;
+    }
+    
+    #warning-text {
+        color: $warning;
+        margin: 1 0;
+        text-align: center;
+    }
+    """
+    
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+    
+    def __init__(self, container):
+        super().__init__()
+        self.container = container
+        self.current_path = os.getcwd()
+        self.service_name = None
+        self.compose_project = None
+        self._detect_compose_info()
+    
+    def _detect_compose_info(self):
+        """Try to detect docker-compose project and service name from container labels."""
+        try:
+            labels = self.container.labels
+            # Common docker-compose labels
+            self.compose_project = labels.get('com.docker.compose.project', '')
+            self.service_name = labels.get('com.docker.compose.service', '')
+            
+            # Try to detect compose working directory
+            compose_dir = labels.get('com.docker.compose.project.working_dir', '')
+            if compose_dir and os.path.exists(compose_dir):
+                self.current_path = compose_dir
+        except Exception:
+            pass
+    
+    def compose(self) -> ComposeResult:
+        """Create the recreate dialog UI."""
+        with Vertical(id="recreate-dialog"):
+            yield Label(f"♻️ Recreate Container: {self.container.name}", id="recreate-title")
+            
+            # Info section
+            with Container(id="info-section"):
+                image_name = self.container.image.tags[0] if self.container.image.tags else self.container.image.short_id
+                yield Label(f"Image: {image_name}", classes="info-label")
+                yield Label(f"Status: {self.container.status}", classes="info-label")
+                
+                if self.compose_project:
+                    yield Label(f"Compose Project: {self.compose_project}", classes="info-label")
+                if self.service_name:
+                    yield Label(f"Service Name: {self.service_name}", classes="info-label")
+            
+            # Path input section
+            with Container(id="path-section"):
+                yield Label("Docker Compose Directory:", classes="info-label")
+                yield Input(
+                    value=self.current_path,
+                    id="path-input",
+                    placeholder="Enter path to docker-compose.yml (leave empty for simple recreate)"
+                )
+                yield Label("Note: Leave empty to recreate without docker-compose", classes="info-label")
+            
+            # Compose detection status
+            yield Label("", id="compose-status")
+            
+            # Warning
+            yield Label(
+                "⚠️ This will stop, remove and recreate the container",
+                id="warning-text"
+            )
+            
+            # Action buttons
+            with Container(id="actions"):
+                yield Button("Recreate with Compose", id="recreate", classes="action-button", variant="error")
+                yield Button("Simple Recreate", id="simple-recreate", classes="action-button", variant="warning")
+                yield Button("Cancel", id="cancel", classes="action-button", variant="default")
+    
+    @on(Input.Changed, "#path-input")
+    def on_path_changed(self, event: Input.Changed) -> None:
+        """Validate path and check for compose files."""
+        path = event.value.strip()
+        status_label = self.query_one("#compose-status", Label)
+        
+        if not path:
+            status_label.update("")
+            return
+        
+        # Expand user path
+        path = os.path.expanduser(path)
+        
+        if not os.path.exists(path):
+            status_label.update("❌ Directory does not exist")
+            status_label.styles.color = "red"
+            return
+        
+        if not os.path.isdir(path):
+            status_label.update("❌ Path is not a directory")
+            status_label.styles.color = "red"
+            return
+        
+        # Check for compose files
+        compose_files = []
+        for filename in ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']:
+            file_path = os.path.join(path, filename)
+            if os.path.exists(file_path):
+                compose_files.append(filename)
+        
+        if compose_files:
+            status_label.update(f"✓ Found: {', '.join(compose_files)}")
+            status_label.styles.color = "green"
+        else:
+            status_label.update("⚠️ No docker-compose file found in directory")
+            status_label.styles.color = "yellow"
+    
+    @on(Button.Pressed)
+    def handle_button(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "recreate":
+            path = self.query_one("#path-input", Input).value.strip()
+            if path:
+                path = os.path.expanduser(path)
+                self.dismiss({
+                    'action': 'recreate-compose',
+                    'path': path,
+                    'service': self.service_name or self.container.name
+                })
+            else:
+                # No path - do simple recreate
+                self.dismiss({
+                    'action': 'recreate-simple'
+                })
+        elif event.button.id == "simple-recreate":
+            # Simple recreate without compose
+            self.dismiss({
+                'action': 'recreate-simple'
+            })
+    
+    def action_cancel(self) -> None:
+        """Cancel action."""
+        self.dismiss(None)
 
 
 class ColumnSettingsModal(ModalScreen[Optional[List[Dict[str, Any]]]]):
