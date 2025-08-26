@@ -1395,7 +1395,8 @@ class DockerTUIApp(App):
                             asyncio.create_task(self.execute_docker_compose_recreate(
                                 container,
                                 result['path'],
-                                result['service']
+                                result['service'],
+                                result.get('compose_file')  # Pass the selected file
                             ))
                         elif result.get('action') == 'recreate-simple':
                             asyncio.create_task(self.execute_simple_recreate(container))
@@ -1779,7 +1780,7 @@ class DockerTUIApp(App):
             except Exception:
                 pass
     
-    async def execute_docker_compose_recreate(self, container, compose_path: str, service_name: str) -> None:
+    async def execute_docker_compose_recreate(self, container, compose_path: str, service_name: str, selected_file: Optional[str] = None) -> None:
         """Execute docker-compose to recreate a container."""
         try:
             # Validate path exists
@@ -1791,16 +1792,24 @@ class DockerTUIApp(App):
                 self.notify(f"Path is not a directory: {compose_path}", severity="error")
                 return
             
-            # Check for docker-compose file
-            compose_file = None
-            for filename in ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']:
-                file_path = os.path.join(compose_path, filename)
-                if os.path.exists(file_path):
-                    compose_file = filename
-                    break
-            
+            # Use selected file if provided, otherwise check for standard files
+            compose_file = selected_file
             if not compose_file:
-                self.notify("No docker-compose file found in directory", severity="error")
+                # Check for standard docker-compose files
+                for filename in ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']:
+                    file_path = os.path.join(compose_path, filename)
+                    if os.path.exists(file_path):
+                        compose_file = filename
+                        break
+            
+            # Verify the selected/detected file exists
+            if compose_file:
+                full_path = os.path.join(compose_path, compose_file)
+                if not os.path.exists(full_path):
+                    self.notify(f"Compose file not found: {compose_file}", severity="error")
+                    return
+            else:
+                self.notify("No docker-compose file specified or found", severity="error")
                 return
             
             # Check if docker-compose or docker compose is available
@@ -1973,7 +1982,7 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
     #recreate-dialog {
         width: 80;
         height: auto;
-        max-height: 30;
+        max-height: 35;
         padding: 1 2;
         background: $surface;
         border: thick $primary;
@@ -2006,6 +2015,12 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
     #path-input {
         width: 100%;
         margin: 0 0 1 0;
+    }
+    
+    #compose-file-select {
+        width: 100%;
+        margin: 0 0 1 0;
+        display: none;
     }
     
     #compose-options {
@@ -2048,6 +2063,8 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
         self.current_path = os.getcwd()
         self.service_name = None
         self.compose_project = None
+        self.selected_compose_file = None
+        self.yaml_files = []
         self._detect_compose_info()
     
     def _detect_compose_info(self):
@@ -2064,6 +2081,14 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                 self.current_path = compose_dir
         except Exception:
             pass
+    
+    def on_mount(self) -> None:
+        """Initialize the dialog when mounted."""
+        # Trigger initial path validation to populate dropdown if needed
+        path_input = self.query_one("#path-input", Input)
+        if path_input.value:
+            # Simulate path change to trigger validation
+            self.on_path_changed(Input.Changed(path_input, path_input.value))
     
     def compose(self) -> ComposeResult:
         """Create the recreate dialog UI."""
@@ -2089,6 +2114,13 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                     id="path-input",
                     placeholder="Enter path to docker-compose.yml (leave empty for simple recreate)"
                 )
+                # Dropdown for YAML files (hidden by default)
+                yield Select(
+                    [],
+                    prompt="Select a compose file",
+                    id="compose-file-select",
+                    allow_blank=False
+                )
                 yield Label("Note: Leave empty to recreate without docker-compose", classes="info-label")
             
             # Compose detection status
@@ -2111,9 +2143,15 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
         """Validate path and check for compose files."""
         path = event.value.strip()
         status_label = self.query_one("#compose-status", Label)
+        select_widget = self.query_one("#compose-file-select", Select)
+        
+        # Reset selection
+        self.selected_compose_file = None
+        self.yaml_files = []
         
         if not path:
             status_label.update("")
+            select_widget.styles.display = "none"
             return
         
         # Expand user path
@@ -2122,26 +2160,59 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
         if not os.path.exists(path):
             status_label.update("❌ Directory does not exist")
             status_label.styles.color = "red"
+            select_widget.styles.display = "none"
             return
         
         if not os.path.isdir(path):
             status_label.update("❌ Path is not a directory")
             status_label.styles.color = "red"
+            select_widget.styles.display = "none"
             return
         
-        # Check for compose files
+        # Check for standard compose files
         compose_files = []
         for filename in ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']:
             file_path = os.path.join(path, filename)
             if os.path.exists(file_path):
                 compose_files.append(filename)
+                self.selected_compose_file = filename  # Auto-select the first standard file found
         
         if compose_files:
             status_label.update(f"✓ Found: {', '.join(compose_files)}")
             status_label.styles.color = "green"
+            select_widget.styles.display = "none"  # Hide dropdown if standard files found
         else:
-            status_label.update("⚠️ No docker-compose file found in directory")
-            status_label.styles.color = "yellow"
+            # No standard compose files, look for all YAML files
+            try:
+                all_files = os.listdir(path)
+                self.yaml_files = [f for f in all_files 
+                                 if f.endswith(('.yml', '.yaml')) and os.path.isfile(os.path.join(path, f))]
+                
+                if self.yaml_files:
+                    # Show dropdown with YAML files
+                    select_widget.styles.display = "block"
+                    select_options = [(f, f) for f in sorted(self.yaml_files)]
+                    select_widget.set_options(select_options)
+                    
+                    status_label.update(f"⚠️ No standard compose file found. {len(self.yaml_files)} YAML file(s) available")
+                    status_label.styles.color = "yellow"
+                else:
+                    status_label.update("⚠️ No docker-compose or YAML files found in directory")
+                    status_label.styles.color = "yellow"
+                    select_widget.styles.display = "none"
+            except Exception as e:
+                status_label.update(f"❌ Error reading directory: {e}")
+                status_label.styles.color = "red"
+                select_widget.styles.display = "none"
+    
+    @on(Select.Changed, "#compose-file-select")
+    def on_file_selected(self, event: Select.Changed) -> None:
+        """Handle YAML file selection from dropdown."""
+        if event.value:
+            self.selected_compose_file = event.value
+            status_label = self.query_one("#compose-status", Label)
+            status_label.update(f"✓ Selected: {event.value}")
+            status_label.styles.color = "green"
     
     @on(Button.Pressed)
     def handle_button(self, event: Button.Pressed) -> None:
@@ -2152,10 +2223,13 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
             path = self.query_one("#path-input", Input).value.strip()
             if path:
                 path = os.path.expanduser(path)
+                # Use selected file if available, otherwise will auto-detect
+                compose_file = self.selected_compose_file
                 self.dismiss({
                     'action': 'recreate-compose',
                     'path': path,
-                    'service': self.service_name or self.container.name
+                    'service': self.service_name or self.container.name,
+                    'compose_file': compose_file
                 })
             else:
                 # No path - do simple recreate
