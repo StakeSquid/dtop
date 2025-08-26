@@ -8,7 +8,12 @@ import asyncio
 import datetime
 import docker
 import json
+import os
+import subprocess
+import sys
+import termios
 import time
+import tty
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
 
@@ -1380,7 +1385,8 @@ class DockerTUIApp(App):
                 self.notify(f"Removed {container.name}", severity="warning")
                 await self.refresh_containers()
             elif action == "exec":
-                self.notify("Exec shell requires terminal - use 'docker exec -it' instead", severity="information")
+                # Execute shell into container
+                await self.execute_shell_into_container(container)
             elif action == "recreate":
                 self.notify("Recreate requires docker-compose", severity="information")
         except Exception as e:
@@ -1481,6 +1487,176 @@ class DockerTUIApp(App):
         Q - Quit
         """
         self.notify(help_text, title="Help", timeout=10)
+    
+    async def execute_shell_into_container(self, container) -> None:
+        """Execute an interactive shell session into the container."""
+        try:
+            # Check if container is running
+            if container.status != "running":
+                self.notify(f"Container {container.name} is not running", severity="warning")
+                return
+            
+            # Check if container is Windows or Linux based
+            # Try to detect OS by checking for typical Windows paths
+            is_windows_container = False
+            try:
+                test_result = container.exec_run("test -d C:\\Windows")
+                if hasattr(test_result, 'exit_code'):
+                    is_windows_container = test_result.exit_code == 0
+                elif isinstance(test_result, tuple):
+                    is_windows_container = test_result[0] == 0
+            except Exception:
+                pass
+            
+            # Determine available shells in order of preference
+            if is_windows_container:
+                shells_to_try = ["powershell.exe", "cmd.exe"]
+            else:
+                shells_to_try = ["/bin/bash", "/bin/sh", "/bin/ash", "/bin/zsh"]
+            available_shell = None
+            
+            # Test which shell is available
+            for shell in shells_to_try:
+                try:
+                    # Test if shell exists in container
+                    if is_windows_container:
+                        # For Windows, try to run the shell with a simple command
+                        test_cmd = f'{shell} /c "exit 0"' if shell == "cmd.exe" else f'{shell} -Command "exit 0"'
+                    else:
+                        # For Linux, test if shell exists
+                        test_cmd = f"test -e {shell}"
+                    
+                    exec_result = container.exec_run(test_cmd)
+                    # Handle both old and new docker-py API versions
+                    if hasattr(exec_result, 'exit_code'):
+                        exit_code = exec_result.exit_code
+                    else:
+                        # Older versions might return tuple (exit_code, output)
+                        exit_code = exec_result[0] if isinstance(exec_result, tuple) else 1
+                    
+                    if exit_code == 0:
+                        available_shell = shell
+                        break
+                except Exception:
+                    continue
+            
+            if not available_shell:
+                self.notify(f"No shell found in container {container.name}", severity="error")
+                return
+            
+            # Check if the container has TTY capability
+            container_info = container.attrs
+            has_tty = container_info.get('Config', {}).get('Tty', False)
+            
+            # Build the docker exec command
+            docker_cmd = ["docker", "exec"]
+            
+            # Add interactive and TTY flags if supported
+            if has_tty or not is_windows_container:
+                docker_cmd.extend(["-it"])
+            else:
+                # For non-TTY containers, still try interactive mode
+                docker_cmd.append("-i")
+            
+            # Set user if specified in container config
+            user = container_info.get('Config', {}).get('User', None)
+            if user:
+                docker_cmd.extend(["-u", user])
+            
+            # Set working directory to a sensible default if available
+            working_dir = container_info.get('Config', {}).get('WorkingDir', None)
+            if working_dir:
+                docker_cmd.extend(["-w", working_dir])
+            
+            # Add container ID and shell
+            docker_cmd.extend([container.id, available_shell])
+            
+            # Show notification about entering shell
+            self.notify(f"Entering shell in {container.name}...", timeout=1)
+            
+            # Save terminal state and prepare for suspension
+            def run_docker_exec():
+                """Run docker exec in a clean terminal environment."""
+                # Save current terminal settings
+                old_tty = None
+                try:
+                    old_tty = termios.tcgetattr(sys.stdin)
+                except Exception:
+                    pass
+                
+                # Reset terminal to a clean state
+                sys.stdout.write('\033c')  # Reset terminal
+                sys.stdout.write('\033[?1000l')  # Disable mouse reporting
+                sys.stdout.write('\033[?1002l')  # Disable mouse motion tracking  
+                sys.stdout.write('\033[?1003l')  # Disable any mouse mode
+                sys.stdout.write('\033[?1006l')  # Disable SGR mouse mode
+                sys.stdout.write('\033[?1015l')  # Disable urxvt mouse mode
+                sys.stdout.write('\033[?25h')   # Show cursor
+                sys.stdout.write('\033[0m')  # Reset all attributes
+                sys.stdout.write('\033[2J\033[H')  # Clear screen and move cursor to top
+                sys.stdout.flush()
+                
+                # Small delay to ensure terminal is ready
+                time.sleep(0.1)
+                
+                try:
+                    # Execute the docker command in the terminal
+                    result = subprocess.call(docker_cmd)
+                    
+                    # Handle different exit codes
+                    if result == 0:
+                        # Success - do nothing, just resume
+                        pass
+                    elif result == 125:
+                        # Docker daemon error
+                        print("\nError: Docker daemon error occurred")
+                    elif result == 126:
+                        # Container command not executable
+                        print(f"\nError: Shell {available_shell} is not executable in container")
+                    elif result == 127:
+                        # Container command not found
+                        print(f"\nError: Shell {available_shell} not found in container")
+                    else:
+                        # Other error
+                        print(f"\nShell exited with code {result}")
+                    
+                    # Wait for user to acknowledge if there was an error
+                    if result != 0:
+                        print("\nPress Enter to return to Docker TUI...")
+                        input()
+                        
+                except FileNotFoundError:
+                    print("\nError: Docker command not found. Please ensure Docker is installed.")
+                    print("Press Enter to return to Docker TUI...")
+                    input()
+                except KeyboardInterrupt:
+                    # User pressed Ctrl+C - this is normal
+                    print("\n\nReturning to Docker TUI...")
+                except Exception as e:
+                    print(f"\nError executing shell: {e}")
+                    print("Press Enter to return to Docker TUI...")
+                    input()
+                finally:
+                    # Restore terminal settings
+                    if old_tty:
+                        try:
+                            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
+                        except Exception:
+                            pass
+                    
+                    # Clear screen and reset terminal state before returning
+                    sys.stdout.write('\033[2J\033[H')  # Clear screen
+                    sys.stdout.write('\033[0m')  # Reset attributes
+                    sys.stdout.flush()
+            
+            # Use Textual's suspend context manager with the callback
+            with self.suspend():
+                run_docker_exec()
+            
+            # After resuming, the app will automatically restore mouse mode and redraw
+            
+        except Exception as e:
+            self.notify(f"Failed to execute shell: {e}", severity="error")
 
     # -----------------------------
     # Column settings UI
