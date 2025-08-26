@@ -2116,10 +2116,10 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                 )
                 # Dropdown for YAML files (hidden by default)
                 yield Select(
-                    [],
+                    [("No file selected", "")],  # Provide a default option
                     prompt="Select a compose file",
                     id="compose-file-select",
-                    allow_blank=False
+                    allow_blank=True
                 )
                 yield Label("Note: Leave empty to recreate without docker-compose", classes="info-label")
             
@@ -2191,7 +2191,8 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                 if self.yaml_files:
                     # Show dropdown with YAML files
                     select_widget.styles.display = "block"
-                    select_options = [(f, f) for f in sorted(self.yaml_files)]
+                    # Add placeholder as first option
+                    select_options = [("Select a file...", "")] + [(f, f) for f in sorted(self.yaml_files)]
                     select_widget.set_options(select_options)
                     
                     status_label.update(f"⚠️ No standard compose file found. {len(self.yaml_files)} YAML file(s) available")
@@ -2208,11 +2209,13 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
     @on(Select.Changed, "#compose-file-select")
     def on_file_selected(self, event: Select.Changed) -> None:
         """Handle YAML file selection from dropdown."""
-        if event.value:
+        if event.value and event.value != "":  # Check for non-empty selection
             self.selected_compose_file = event.value
             status_label = self.query_one("#compose-status", Label)
             status_label.update(f"✓ Selected: {event.value}")
             status_label.styles.color = "green"
+        else:
+            self.selected_compose_file = None
     
     @on(Button.Pressed)
     def handle_button(self, event: Button.Pressed) -> None:
