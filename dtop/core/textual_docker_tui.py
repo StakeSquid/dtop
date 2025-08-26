@@ -2084,11 +2084,9 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
     
     def on_mount(self) -> None:
         """Initialize the dialog when mounted."""
-        # Trigger initial path validation to populate dropdown if needed
-        path_input = self.query_one("#path-input", Input)
-        if path_input.value:
-            # Simulate path change to trigger validation
-            self.on_path_changed(Input.Changed(path_input, path_input.value))
+        # Validate the initial path (compose working directory or current directory)
+        if self.current_path:
+            self._validate_and_check_path(self.current_path)
     
     def compose(self) -> ComposeResult:
         """Create the recreate dialog UI."""
@@ -2138,10 +2136,8 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                 yield Button("Simple Recreate", id="simple-recreate", classes="action-button", variant="warning")
                 yield Button("Cancel", id="cancel", classes="action-button", variant="default")
     
-    @on(Input.Changed, "#path-input")
-    def on_path_changed(self, event: Input.Changed) -> None:
+    def _validate_and_check_path(self, path: str) -> None:
         """Validate path and check for compose files."""
-        path = event.value.strip()
         status_label = self.query_one("#compose-status", Label)
         select_widget = self.query_one("#compose-file-select", Select)
         
@@ -2205,6 +2201,12 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                 status_label.update(f"❌ Error reading directory: {e}")
                 status_label.styles.color = "red"
                 select_widget.styles.display = "none"
+    
+    @on(Input.Changed, "#path-input")
+    def on_path_changed(self, event: Input.Changed) -> None:
+        """Handle path input changes."""
+        path = event.value.strip()
+        self._validate_and_check_path(path)
     
     @on(Select.Changed, "#compose-file-select")
     def on_file_selected(self, event: Select.Changed) -> None:
