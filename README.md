@@ -44,6 +44,14 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/StakeSquid/dtop/mai
 git clone https://github.com/StakeSquid/dtop && cd dtop && pip install -e .
 ```
 
+### Upgrading
+
+If you have a previous version installed, make sure to upgrade:
+
+```bash
+pip install --upgrade dtop
+```
+
 ## Usage
 
 ```bash
