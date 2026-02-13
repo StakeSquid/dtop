@@ -255,7 +255,7 @@ dtop/
 | `docker` | >= 6.0.0 | Docker SDK |
 | `textual` | >= 0.47.0 | TUI framework |
 | `rich` | >= 13.0.0 | Terminal formatting |
-| `aiohttp` | >= 3.8.0 *(optional)* | Enhanced async stats |
+| `aiohttp` | >= 3.8.0 | Async stats collection |
 
 ## License
 
