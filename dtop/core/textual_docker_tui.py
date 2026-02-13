@@ -31,7 +31,7 @@ from textual.coordinate import Coordinate
 from rich.text import Text
 
 from ..utils.utils import format_bytes, format_datetime, format_timedelta
-from ..utils.config import load_config, save_config
+from ..utils.config import load_config, save_config, load_theme, save_theme
 from ..views.textual_log_view import LogViewScreen
 from ..views.textual_inspect_view import InspectViewScreen
 from .textual_stats import StatsManager
@@ -490,6 +490,12 @@ class ContainerActionModal(ModalScreen):
         self.dismiss("recreate")
 
 
+THEME_PRESETS = [
+    "textual-dark", "textual-light", "dracula", "nord", "tokyo-night",
+    "monokai", "gruvbox", "catppuccin-mocha", "catppuccin-latte", "solarized-light",
+]
+
+
 class DockerTUIApp(App):
     """Complete Docker TUI Application using Textual."""
     
@@ -595,7 +601,7 @@ class DockerTUIApp(App):
         Binding("escape", "clear_filter", "Clear"),
         Binding("shift+w", "toggle_wrap", "Wrap"),
         Binding("?", "help", "Help"),
-        Binding("d", "toggle_dark", "Theme"),
+        Binding("d", "cycle_theme", "Theme"),
         Binding("c", "column_settings", "Columns"),
     ]
     
@@ -620,6 +626,7 @@ class DockerTUIApp(App):
         self.stats_manager = StatsManager()
         self.stats_cache = {}
         self.columns = load_config()
+        self._initial_theme = load_theme()
         self.refresh_timer = None
         # Default sort by NAME column if present
         try:
@@ -758,6 +765,7 @@ class DockerTUIApp(App):
     
     async def on_mount(self) -> None:
         """Initialize when app is mounted."""
+        self.theme = self._initial_theme
         await self.connect_docker()
         await self.setup_table()
         await self.start_stats_collection()
@@ -1517,9 +1525,14 @@ class DockerTUIApp(App):
         asyncio.create_task(self.refresh_containers())
         self.notify("Refreshed", timeout=1)
     
-    def action_toggle_dark(self) -> None:
-        """Toggle dark mode."""
-        self.dark = not self.dark
+    def action_cycle_theme(self) -> None:
+        """Cycle through theme presets."""
+        current = self.theme
+        idx = THEME_PRESETS.index(current) if current in THEME_PRESETS else -1
+        next_theme = THEME_PRESETS[(idx + 1) % len(THEME_PRESETS)]
+        self.theme = next_theme
+        save_theme(next_theme)
+        self.notify(f"Theme: {next_theme}", timeout=1)
     
     def action_help(self) -> None:
         """Show help."""

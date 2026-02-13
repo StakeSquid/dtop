@@ -109,11 +109,42 @@ def load_config():
 def save_config(columns):
     """Save column configuration to file"""
     try:
-        config = {
-            'columns': columns
-        }
+        # Preserve existing config keys (e.g. theme)
+        existing = {}
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                existing = json.load(f)
+        existing['columns'] = columns
         with open(CONFIG_FILE, 'w') as f:
-            json.dump(config, f, indent=2)
+            json.dump(existing, f, indent=2)
     except Exception:
-        # Ignore errors in saving config
+        pass
+
+
+DEFAULT_THEME = "textual-dark"
+
+
+def load_theme():
+    """Load theme name from config, default to textual-dark."""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+                return config.get('theme', DEFAULT_THEME)
+    except Exception:
+        pass
+    return DEFAULT_THEME
+
+
+def save_theme(theme_name):
+    """Save theme name to config without touching other keys."""
+    try:
+        existing = {}
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                existing = json.load(f)
+        existing['theme'] = theme_name
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(existing, f, indent=2)
+    except Exception:
         pass
