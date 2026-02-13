@@ -443,6 +443,12 @@ class LogViewScreen(Screen):
             os.path.dirname(os.path.abspath(__file__)), 
             "..", "utils", "normalize_logs.py"
         )
+
+    def _semantic_color(self, key: str, fallback: str) -> str:
+        """Get app-configured semantic color if available."""
+        if self.app and hasattr(self.app, "_semantic_color"):
+            return self.app._semantic_color(key, fallback)
+        return fallback
     
     def compose(self) -> ComposeResult:
         """Create the log view UI."""
@@ -587,7 +593,7 @@ class LogViewScreen(Screen):
         """Handle loaded logs."""
         if error:
             log_widget = self.query_one("#log-content", RichLog)
-            log_widget.write(Text(logs, style="red"))
+            log_widget.write(Text(logs, style=self._semantic_color("error_text", "red")))
             return
         
         # Unpack both versions if we have them
@@ -648,7 +654,7 @@ class LogViewScreen(Screen):
         
         # Return early if no logs
         if not self.raw_logs:
-            log_widget.write(Text("No logs available yet...", style="dim"))
+            log_widget.write(Text("No logs available yet...", style=self._semantic_color("muted_text", "dim")))
             return
         
         # Apply normalization if enabled
@@ -1035,7 +1041,7 @@ class LogViewScreen(Screen):
                 parts = line.split(' ', 1)
                 if len(parts) == 2:
                     timestamp, content = parts
-                    text.append(timestamp, style="dim cyan")
+                    text.append(timestamp, style=self._semantic_color("timestamp_text", "dim cyan"))
                     text.append(" ")
                     line = content
             except:
@@ -1044,13 +1050,13 @@ class LogViewScreen(Screen):
         # Detect log level and apply colors
         line_lower = line.lower()
         if 'error' in line_lower or 'fatal' in line_lower:
-            style = "red"
+            style = self._semantic_color("error_text", "red")
         elif 'warn' in line_lower:
-            style = "yellow"
+            style = self._semantic_color("warning_text", "yellow")
         elif 'info' in line_lower:
-            style = "blue"
+            style = self._semantic_color("info_text", "blue")
         elif 'debug' in line_lower:
-            style = "dim"
+            style = self._semantic_color("muted_text", "dim")
         else:
             style = ""
         
@@ -1070,9 +1076,15 @@ class LogViewScreen(Screen):
                     # Add highlighted match
                     if index == self.matches[self.current_match_index] if self.matches else False:
                         # Current match - different highlight
-                        text.append(line[match.start():match.end()], style="reverse bold yellow")
+                        text.append(
+                            line[match.start():match.end()],
+                            style=self._semantic_color("search_highlight_case", "reverse bold yellow"),
+                        )
                     else:
-                        text.append(line[match.start():match.end()], style="reverse yellow")
+                        text.append(
+                            line[match.start():match.end()],
+                            style=self._semantic_color("search_highlight", "reverse yellow"),
+                        )
                     last_end = match.end()
                 
                 # Add remaining text

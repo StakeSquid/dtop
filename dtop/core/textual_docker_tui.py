@@ -28,10 +28,21 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.timer import Timer
 from textual.coordinate import Coordinate
+from textual.theme import Theme
 from rich.text import Text
 
 from ..utils.utils import format_bytes, format_datetime, format_timedelta
-from ..utils.config import load_config, save_config
+from ..utils.config import (
+    load_config,
+    save_config,
+    load_theme,
+    save_theme,
+    load_custom_theme,
+    save_custom_theme,
+    CUSTOM_THEME_NAME,
+    DEFAULT_THEME,
+    DEFAULT_SEMANTIC_COLORS,
+)
 from ..views.textual_log_view import LogViewScreen
 from ..views.textual_inspect_view import InspectViewScreen
 from .textual_stats import StatsManager
@@ -178,10 +189,16 @@ class ContainerViewHeader(Container):
             status_label = self.query_one("#connection-indicator", Label)
             if connected:
                 status_label.update("✓ Connected")
-                status_label.styles.color = "green"
+                color = "green"
+                if self.app_instance and hasattr(self.app_instance, "_semantic_color"):
+                    color = self.app_instance._semantic_color("connection_ok", color)
+                status_label.styles.color = color
             else:
                 status_label.update(f"✗ {message or 'Disconnected'}")
-                status_label.styles.color = "red"
+                color = "red"
+                if self.app_instance and hasattr(self.app_instance, "_semantic_color"):
+                    color = self.app_instance._semantic_color("connection_error", color)
+                status_label.styles.color = color
         except Exception:
             pass
     
@@ -300,6 +317,8 @@ class ContainerViewFooter(Container):
                 yield Label("Columns", classes="footer-desc")
                 yield Label("D", classes="footer-key")
                 yield Label("Theme", classes="footer-desc")
+                yield Label("T", classes="footer-key")
+                yield Label("Theme Edit", classes="footer-desc")
                 yield Label("?", classes="footer-key")
                 yield Label("Help", classes="footer-desc")
                 yield Static("", classes="spacer")  # Spacer
@@ -490,6 +509,44 @@ class ContainerActionModal(ModalScreen):
         self.dismiss("recreate")
 
 
+THEME_PRESETS = [
+    "textual-dark", "textual-light", "dracula", "nord", "tokyo-night",
+    "monokai", "gruvbox", "catppuccin-mocha", "catppuccin-latte", "solarized-light",
+]
+
+THEME_COLOR_FIELDS = [
+    ("primary", "Primary"),
+    ("secondary", "Secondary"),
+    ("warning", "Warning"),
+    ("error", "Error"),
+    ("success", "Success"),
+    ("accent", "Accent"),
+    ("foreground", "Foreground"),
+    ("background", "Background"),
+    ("surface", "Surface"),
+    ("panel", "Panel"),
+    ("boost", "Boost"),
+]
+
+SEMANTIC_COLOR_FIELDS = [
+    ("status_running", "Status Running"),
+    ("status_stopped", "Status Stopped"),
+    ("status_paused", "Status Paused"),
+    ("connection_ok", "Connection OK"),
+    ("connection_error", "Connection Error"),
+    ("warning_text", "Warning Text"),
+    ("error_text", "Error Text"),
+    ("info_text", "Info Text"),
+    ("muted_text", "Muted Text"),
+    ("timestamp_text", "Timestamp Text"),
+    ("inspect_bool", "Inspect Bool"),
+    ("inspect_number", "Inspect Number"),
+    ("inspect_string", "Inspect String"),
+    ("search_highlight", "Search Highlight"),
+    ("search_highlight_case", "Search Current"),
+]
+
+
 class DockerTUIApp(App):
     """Complete Docker TUI Application using Textual."""
     
@@ -595,7 +652,8 @@ class DockerTUIApp(App):
         Binding("escape", "clear_filter", "Clear"),
         Binding("shift+w", "toggle_wrap", "Wrap"),
         Binding("?", "help", "Help"),
-        Binding("d", "toggle_dark", "Theme"),
+        Binding("d", "cycle_theme", "Theme"),
+        Binding("t", "theme_settings", "Theme Edit"),
         Binding("c", "column_settings", "Columns"),
     ]
     
@@ -620,6 +678,9 @@ class DockerTUIApp(App):
         self.stats_manager = StatsManager()
         self.stats_cache = {}
         self.columns = load_config()
+        self._semantic_colors = DEFAULT_SEMANTIC_COLORS.copy()
+        self._register_custom_theme_if_configured()
+        self._initial_theme = self._resolve_initial_theme(load_theme())
         self.refresh_timer = None
         # Default sort by NAME column if present
         try:
@@ -630,6 +691,127 @@ class DockerTUIApp(App):
         self.sort_reverse = False
         self.selected_container_id = None
         self.last_refresh = 0
+
+    def _register_custom_theme_if_configured(self) -> None:
+        """Register a user-defined theme from config when present."""
+        custom = load_custom_theme()
+        if not custom:
+            return
+        self._semantic_colors = custom.get("semantic_colors", DEFAULT_SEMANTIC_COLORS.copy())
+        try:
+            theme = Theme(
+                name=CUSTOM_THEME_NAME,
+                primary=custom["primary"],
+                secondary=custom.get("secondary"),
+                warning=custom.get("warning"),
+                error=custom.get("error"),
+                success=custom.get("success"),
+                accent=custom.get("accent"),
+                foreground=custom.get("foreground"),
+                background=custom.get("background"),
+                surface=custom.get("surface"),
+                panel=custom.get("panel"),
+                boost=custom.get("boost"),
+                dark=custom.get("dark", True),
+                luminosity_spread=custom.get("luminosity_spread", 0.15),
+                text_alpha=custom.get("text_alpha", 0.95),
+                variables=custom.get("variables", {}),
+            )
+            self.register_theme(theme)
+        except Exception:
+            # If config has invalid values, keep app booting with built-in themes.
+            pass
+
+    def _resolve_initial_theme(self, configured_theme: str) -> str:
+        """Return a valid startup theme that exists in available themes."""
+        available = set(self.available_themes.keys())
+        if configured_theme in available:
+            return configured_theme
+        return DEFAULT_THEME
+
+    def _theme_cycle_order(self) -> List[str]:
+        """Return theme cycle list, including custom when registered."""
+        names = [name for name in THEME_PRESETS if name in self.available_themes]
+        if CUSTOM_THEME_NAME in self.available_themes:
+            names.append(CUSTOM_THEME_NAME)
+        return names or [DEFAULT_THEME]
+
+    def _semantic_color(self, key: str, fallback: str) -> str:
+        """Fetch runtime semantic color with fallback."""
+        return self._semantic_colors.get(key, fallback)
+
+    def _default_custom_theme(self) -> Dict[str, Any]:
+        """Generate a sensible default custom-theme payload."""
+        return {
+            "primary": "#0178D4",
+            "secondary": "#004578",
+            "warning": "#F5A524",
+            "error": "#E5484D",
+            "success": "#2FB344",
+            "accent": "#7C3AED",
+            "foreground": "#F3F4F6",
+            "background": "#111827",
+            "surface": "#1F2937",
+            "panel": "#111827",
+            "boost": "#0B1220",
+            "dark": True,
+            "luminosity_spread": 0.15,
+            "text_alpha": 0.95,
+            "variables": {},
+            "semantic_colors": DEFAULT_SEMANTIC_COLORS.copy(),
+        }
+
+    def _apply_custom_theme(self, custom_theme: Dict[str, Any], persist: bool = True) -> None:
+        """Register and activate the custom theme in the running app."""
+        payload = self._default_custom_theme()
+        payload.update(custom_theme or {})
+        payload["semantic_colors"] = {
+            **DEFAULT_SEMANTIC_COLORS,
+            **payload.get("semantic_colors", {}),
+        }
+        try:
+            if CUSTOM_THEME_NAME in self.available_themes:
+                self.unregister_theme(CUSTOM_THEME_NAME)
+        except Exception:
+            pass
+        theme = Theme(
+            name=CUSTOM_THEME_NAME,
+            primary=payload["primary"],
+            secondary=payload.get("secondary"),
+            warning=payload.get("warning"),
+            error=payload.get("error"),
+            success=payload.get("success"),
+            accent=payload.get("accent"),
+            foreground=payload.get("foreground"),
+            background=payload.get("background"),
+            surface=payload.get("surface"),
+            panel=payload.get("panel"),
+            boost=payload.get("boost"),
+            dark=payload.get("dark", True),
+            luminosity_spread=payload.get("luminosity_spread", 0.15),
+            text_alpha=payload.get("text_alpha", 0.95),
+            variables=payload.get("variables", {}),
+        )
+        self.register_theme(theme)
+        self._semantic_colors = payload["semantic_colors"]
+        self.theme = CUSTOM_THEME_NAME
+        if persist:
+            save_custom_theme(payload, activate=True)
+
+    def action_theme_settings(self) -> None:
+        """Open a modal for editing custom theme colors."""
+        base = load_custom_theme() or self._default_custom_theme()
+        self.push_screen(ThemeSettingsModal(base), self._handle_theme_settings_result)
+
+    def _handle_theme_settings_result(self, result: Optional[Dict[str, Any]]) -> None:
+        """Persist and apply theme settings from modal."""
+        if not result:
+            return
+        try:
+            self._apply_custom_theme(result, persist=True)
+            self.notify("Custom theme saved and activated", timeout=2)
+        except Exception as e:
+            self.notify(f"Failed to apply custom theme: {e}", severity="error", timeout=6)
 
     # -----------------------------
     # Column width management
@@ -758,6 +940,7 @@ class DockerTUIApp(App):
     
     async def on_mount(self) -> None:
         """Initialize when app is mounted."""
+        self.theme = self._initial_theme
         await self.connect_docker()
         await self.setup_table()
         await self.start_stats_collection()
@@ -796,10 +979,12 @@ class DockerTUIApp(App):
             self.docker_client = docker.from_env()
             status = self.query_one("#connection-status", Label)
             status.update("✓ Connected")
+            status.styles.color = self._semantic_color("connection_ok", "green")
             await self.refresh_containers()
         except docker.errors.DockerException as e:
             status = self.query_one("#connection-status", Label)
             status.update("✗ Disconnected")
+            status.styles.color = self._semantic_color("connection_error", "red")
             self.notify(f"Docker connection failed: {e}", severity="error", timeout=10)
     
     async def setup_table(self) -> None:
@@ -1048,11 +1233,11 @@ class DockerTUIApp(App):
                 status = container.status
                 # Determine base color for status
                 if "running" in status.lower():
-                    row_data.append(self._highlight_text(status, "green"))
+                    row_data.append(self._highlight_text(status, self._semantic_color("status_running", "green")))
                 elif "exited" in status.lower() or "stopped" in status.lower():
-                    row_data.append(self._highlight_text(status, "red"))
+                    row_data.append(self._highlight_text(status, self._semantic_color("status_stopped", "red")))
                 elif "paused" in status.lower():
-                    row_data.append(self._highlight_text(status, "yellow"))
+                    row_data.append(self._highlight_text(status, self._semantic_color("status_paused", "yellow")))
                 else:
                     row_data.append(self._highlight_text(status))
             elif col_name == 'CPU%':
@@ -1517,9 +1702,15 @@ class DockerTUIApp(App):
         asyncio.create_task(self.refresh_containers())
         self.notify("Refreshed", timeout=1)
     
-    def action_toggle_dark(self) -> None:
-        """Toggle dark mode."""
-        self.dark = not self.dark
+    def action_cycle_theme(self) -> None:
+        """Cycle through theme presets."""
+        current = self.theme
+        cycle = self._theme_cycle_order()
+        idx = cycle.index(current) if current in cycle else -1
+        next_theme = cycle[(idx + 1) % len(cycle)]
+        self.theme = next_theme
+        save_theme(next_theme)
+        self.notify(f"Theme: {next_theme}", timeout=1)
     
     def action_help(self) -> None:
         """Show help."""
@@ -1542,7 +1733,8 @@ class DockerTUIApp(App):
         Settings:
         N - Toggle normalize logs
         W - Toggle wrap lines
-        D - Toggle dark mode
+        D - Cycle themes
+        T - Theme editor
         
         Q - Quit
         """
@@ -2230,7 +2422,7 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
             except Exception as e:
                 status = self.query_one("#compose-status", Label)
                 status.update(f"❌ Error reading directory: {e}")
-                status.styles.color = "red"
+                status.styles.color = self.app._semantic_color("error_text", "red")
             
             # Update the data table
             self._update_file_table()
@@ -2238,7 +2430,7 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
         except Exception as e:
             status = self.query_one("#compose-status", Label)
             status.update(f"❌ Error loading directory: {e}")
-            status.styles.color = "red"
+            status.styles.color = self.app._semantic_color("error_text", "red")
     
     def _format_size(self, size: int) -> str:
         """Format file size in human-readable format."""
@@ -2286,7 +2478,7 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                 filename = os.path.basename(path)
                 status = self.query_one("#compose-status", Label)
                 status.update(f"✓ Selected: {filename}")
-                status.styles.color = "green"
+                status.styles.color = self.app._semantic_color("status_running", "green")
     
     @on(Button.Pressed)
     def handle_button(self, event: Button.Pressed) -> None:
@@ -2308,7 +2500,7 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                 # No file selected - show warning
                 status = self.query_one("#compose-status", Label)
                 status.update("⚠️ Please select a docker-compose file or use Simple Recreate")
-                status.styles.color = "yellow"
+                status.styles.color = self.app._semantic_color("warning_text", "yellow")
         elif event.button.id == "simple-recreate":
             # Simple recreate without compose
             self.dismiss({
@@ -2338,7 +2530,7 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
                     filename = os.path.basename(path)
                     status = self.query_one("#compose-status", Label)
                     status.update(f"✓ Selected: {filename}")
-                    status.styles.color = "green"
+                    status.styles.color = self.app._semantic_color("status_running", "green")
     
     def action_go_up(self) -> None:
         """Navigate to parent directory."""
@@ -2435,6 +2627,139 @@ class ColumnSettingsModal(ModalScreen[Optional[List[Dict[str, Any]]]]):
                 except Exception:
                     result.append(col)
             self.dismiss(result)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ThemeSettingsModal(ModalScreen[Optional[Dict[str, Any]]]):
+    """Modal dialog to edit custom theme colors."""
+
+    CSS = """
+    ThemeSettingsModal { align: center middle; }
+    #theme-dialog {
+        width: 100;
+        height: 90%;
+        max-height: 90%;
+        padding: 1 2;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+    }
+    #theme-title {
+        text-align: center;
+        text-style: bold;
+        color: $primary;
+        margin: 0 0 1 0;
+        dock: top;
+        height: auto;
+    }
+    #theme-list { height: 1fr; width: 100%; overflow-y: auto; }
+    .section-title { margin: 1 0 0 0; text-style: bold; color: $primary; }
+    .theme-row { layout: horizontal; height: auto; margin: 0 0 1 0; width: 100%; }
+    .theme-name { width: 24; }
+    .theme-field { width: 1fr; }
+    .meta-label { width: 24; }
+    #actions {
+        layout: horizontal;
+        margin-top: 1;
+        width: 100%;
+        dock: bottom;
+        height: auto;
+    }
+    .action-button { width: 1fr; margin: 0 1 0 0; }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, custom_theme: Dict[str, Any]):
+        super().__init__()
+        self._theme = {
+            **custom_theme,
+            "semantic_colors": {
+                **DEFAULT_SEMANTIC_COLORS,
+                **custom_theme.get("semantic_colors", {}),
+            },
+        }
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="theme-dialog"):
+            yield Label("Theme Editor", id="theme-title")
+            with ScrollableContainer(id="theme-list"):
+                yield Label("Theme Palette", classes="section-title")
+                for key, label in THEME_COLOR_FIELDS:
+                    value = str(self._theme.get(key, ""))
+                    with Horizontal(classes="theme-row"):
+                        yield Label(label, classes="theme-name")
+                        yield Input(value=value, id=f"theme_{key}", classes="theme-field")
+
+                yield Label("Theme Meta", classes="section-title")
+                with Horizontal(classes="theme-row"):
+                    yield Label("Dark Theme", classes="meta-label")
+                    dark_switch = Switch(id="theme_dark")
+                    dark_switch.value = bool(self._theme.get("dark", True))
+                    yield dark_switch
+                with Horizontal(classes="theme-row"):
+                    yield Label("Luminosity Spread", classes="meta-label")
+                    yield Input(
+                        value=str(self._theme.get("luminosity_spread", 0.15)),
+                        id="theme_luminosity_spread",
+                        classes="theme-field",
+                    )
+                with Horizontal(classes="theme-row"):
+                    yield Label("Text Alpha", classes="meta-label")
+                    yield Input(
+                        value=str(self._theme.get("text_alpha", 0.95)),
+                        id="theme_text_alpha",
+                        classes="theme-field",
+                    )
+
+                yield Label("Semantic Colors", classes="section-title")
+                semantic = self._theme.get("semantic_colors", {})
+                for key, label in SEMANTIC_COLOR_FIELDS:
+                    value = str(semantic.get(key, DEFAULT_SEMANTIC_COLORS.get(key, "")))
+                    with Horizontal(classes="theme-row"):
+                        yield Label(label, classes="theme-name")
+                        yield Input(value=value, id=f"semantic_{key}", classes="theme-field")
+
+            with Container(id="actions"):
+                yield Button("Save & Apply", id="save", classes="action-button", variant="primary")
+                yield Button("Cancel", id="cancel", classes="action-button")
+
+    @on(Button.Pressed)
+    def handle_button(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+            return
+        if event.button.id != "save":
+            return
+
+        result = self._theme.copy()
+        for key, _label in THEME_COLOR_FIELDS:
+            value = self.query_one(f"#theme_{key}", Input).value.strip()
+            if value:
+                result[key] = value
+        result["dark"] = self.query_one("#theme_dark", Switch).value
+
+        lum = self.query_one("#theme_luminosity_spread", Input).value.strip()
+        txt = self.query_one("#theme_text_alpha", Input).value.strip()
+        try:
+            result["luminosity_spread"] = float(lum) if lum else 0.15
+        except Exception:
+            result["luminosity_spread"] = 0.15
+        try:
+            result["text_alpha"] = float(txt) if txt else 0.95
+        except Exception:
+            result["text_alpha"] = 0.95
+
+        semantic = dict(DEFAULT_SEMANTIC_COLORS)
+        semantic.update(result.get("semantic_colors", {}))
+        for key, _label in SEMANTIC_COLOR_FIELDS:
+            value = self.query_one(f"#semantic_{key}", Input).value.strip()
+            if value:
+                semantic[key] = value
+        result["semantic_colors"] = semantic
+        self.dismiss(result)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

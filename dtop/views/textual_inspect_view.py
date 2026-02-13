@@ -124,6 +124,12 @@ class InspectViewScreen(Screen):
         self.matches = []
         self.flattened_data = []
         self.current_path = []
+
+    def _semantic_color(self, key: str, fallback: str) -> str:
+        """Get app-configured semantic color if available."""
+        if self.app and hasattr(self.app, "_semantic_color"):
+            return self.app._semantic_color(key, fallback)
+        return fallback
     
     def compose(self) -> ComposeResult:
         """Create the inspect view UI."""
@@ -221,7 +227,10 @@ class InspectViewScreen(Screen):
             for m in pattern.finditer(s):
                 if m.start() > idx:
                     out.append(s[idx:m.start()])
-                out.append(s[m.start():m.end()], style="reverse yellow")
+                out.append(
+                    s[m.start():m.end()],
+                    style=self._semantic_color("search_highlight", "reverse yellow"),
+                )
                 idx = m.end()
             out.append(s[idx:])
             return out
@@ -274,13 +283,13 @@ class InspectViewScreen(Screen):
 
                         # Color code based on type
                         if isinstance(v, bool):
-                            style = "cyan"
+                            style = self._semantic_color("inspect_bool", "cyan")
                         elif isinstance(v, (int, float)):
-                            style = "magenta"
+                            style = self._semantic_color("inspect_number", "magenta")
                         elif v is None:
-                            style = "dim"
+                            style = self._semantic_color("muted_text", "dim")
                         else:
-                            style = "green"
+                            style = self._semantic_color("inspect_string", "green")
 
                         lbl = highlight_parts(k, value_str, style)
                         leaf = parent_node.add_leaf(lbl)
@@ -308,7 +317,11 @@ class InspectViewScreen(Screen):
                         if len(value_str) > 100:
                             value_str = value_str[:97] + "..."
 
-                        lbl = highlight_parts(f"[{i}]", value_str, "green")
+                        lbl = highlight_parts(
+                            f"[{i}]",
+                            value_str,
+                            self._semantic_color("inspect_string", "green"),
+                        )
                         leaf = parent_node.add_leaf(lbl)
                         full_path = make_path(parent_path, f"[{i}]")
                         try:
@@ -361,7 +374,10 @@ class InspectViewScreen(Screen):
                     # Add text before match
                     text.append(line[last_end:match.start()])
                     # Add highlighted match
-                    text.append(line[match.start():match.end()], style="reverse yellow")
+                    text.append(
+                        line[match.start():match.end()],
+                        style=self._semantic_color("search_highlight", "reverse yellow"),
+                    )
                     last_end = match.end()
                 # Add remaining text
                 text.append(line[last_end:] + '\n')
