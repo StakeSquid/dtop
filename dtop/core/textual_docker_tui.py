@@ -213,43 +213,47 @@ class ContainerViewFooter(Container):
     
     DEFAULT_CSS = """
     ContainerViewFooter {
-        height: 2;
+        height: 3;
         background: $primary;
         border-top: solid $primary;
         dock: bottom;
     }
-    
+
+    #footer-container {
+        height: auto;
+    }
+
     #footer-top {
         height: 1;
         layout: horizontal;
         padding: 0 1;
     }
-    
+
     #footer-bottom {
         height: 1;
         layout: horizontal;
         padding: 0 1;
     }
-    
+
     .footer-key {
         margin: 0 1 0 0;
         text-style: bold;
     }
-    
+
     .footer-desc {
         margin: 0 2 0 0;
     }
-    
+
     #selection-info {
         width: auto;
         margin: 0 0 0 1;
     }
-    
+
     #refresh-indicator {
         width: auto;
         margin: 0 0 0 1;
     }
-    
+
     .spacer {
         width: 1fr;
     }
@@ -266,32 +270,38 @@ class ContainerViewFooter(Container):
             # Top row: Primary key bindings
             with Horizontal(id="footer-top"):
                 yield Label("Enter", classes="footer-key")
-                yield Label("Actions", classes="footer-desc")
+                yield Label("Menu", classes="footer-desc")
                 yield Label("L", classes="footer-key")
                 yield Label("Logs", classes="footer-desc")
                 yield Label("I", classes="footer-key")
                 yield Label("Inspect", classes="footer-desc")
+                yield Label("S", classes="footer-key")
+                yield Label("Stop/Start", classes="footer-desc")
+                yield Label("P", classes="footer-key")
+                yield Label("Pause", classes="footer-desc")
                 yield Label("R", classes="footer-key")
-                yield Label("Refresh", classes="footer-desc")
-                yield Label("?", classes="footer-key")
-                yield Label("Help", classes="footer-desc")
+                yield Label("Restart", classes="footer-desc")
+                yield Label("E", classes="footer-key")
+                yield Label("Exec", classes="footer-desc")
+                yield Label("F", classes="footer-key")
+                yield Label("Recreate", classes="footer-desc")
                 yield Label("Q", classes="footer-key")
                 yield Label("Quit", classes="footer-desc")
                 yield Static("", classes="spacer")  # Spacer
                 yield Label("", id="selection-info")
-            
+
             # Bottom row: Status and secondary bindings
             with Horizontal(id="footer-bottom"):
                 yield Label("/", classes="footer-key")
                 yield Label("Search", classes="footer-desc")
                 yield Label("\\", classes="footer-key")
                 yield Label("Filter", classes="footer-desc")
-                yield Label("ESC", classes="footer-key")
-                yield Label("Clear", classes="footer-desc")
                 yield Label("C", classes="footer-key")
                 yield Label("Columns", classes="footer-desc")
                 yield Label("D", classes="footer-key")
                 yield Label("Theme", classes="footer-desc")
+                yield Label("?", classes="footer-key")
+                yield Label("Help", classes="footer-desc")
                 yield Static("", classes="spacer")  # Spacer
                 yield Label("⟳ Auto: 2s", id="refresh-indicator")
     
@@ -380,8 +390,15 @@ class ContainerActionModal(ModalScreen):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
         Binding("q", "cancel", "Cancel"),
+        Binding("l", "do_logs", "Logs"),
+        Binding("i", "do_inspect", "Inspect"),
+        Binding("s", "do_stop_start", "Stop/Start"),
+        Binding("p", "do_pause", "Pause"),
+        Binding("r", "do_restart", "Restart"),
+        Binding("e", "do_exec", "Exec Shell"),
+        Binding("f", "do_recreate", "Recreate"),
     ]
-    
+
     def __init__(self, container):
         super().__init__()
         self.container = container
@@ -438,10 +455,39 @@ class ContainerActionModal(ModalScreen):
             self.action_cancel()
         else:
             self.dismiss(action)
-    
+
     def action_cancel(self) -> None:
         """Cancel action."""
         self.dismiss(None)
+
+    def action_do_logs(self) -> None:
+        self.dismiss("logs")
+
+    def action_do_inspect(self) -> None:
+        self.dismiss("inspect")
+
+    def action_do_stop_start(self) -> None:
+        if self.container.status == "running":
+            self.dismiss("stop")
+        else:
+            self.dismiss("start")
+
+    def action_do_pause(self) -> None:
+        if self.container.status == "paused":
+            self.dismiss("unpause")
+        elif self.container.status == "running":
+            self.dismiss("pause")
+
+    def action_do_restart(self) -> None:
+        if self.container.status == "running":
+            self.dismiss("restart")
+
+    def action_do_exec(self) -> None:
+        if self.container.status == "running":
+            self.dismiss("exec")
+
+    def action_do_recreate(self) -> None:
+        self.dismiss("recreate")
 
 
 class DockerTUIApp(App):
@@ -533,18 +579,21 @@ class DockerTUIApp(App):
     
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
-        Binding("r", "refresh", "Refresh"),
+        Binding("enter", "show_actions", "Actions", show=True),
         Binding("l", "view_logs", "Logs", show=True),
         Binding("i", "inspect", "Inspect", show=True),
-        Binding("enter", "show_actions", "Actions", show=True),
+        Binding("s", "stop_start", "Stop/Start", show=True),
+        Binding("p", "pause_unpause", "Pause", show=True),
+        Binding("r", "restart_container", "Restart", show=True),
+        Binding("e", "exec_shell", "Exec", show=True),
+        Binding("f", "recreate_container", "Recreate", show=True),
         Binding("/", "focus_search", "Search"),
         Binding("n", "search_next", "Next", show=False),
-        Binding("p", "search_prev", "Prev", show=False),
+        Binding("shift+n", "toggle_normalize", "Normalize", show=False),
+        Binding("shift+p", "search_prev", "Prev", show=False),
         Binding("\\", "focus_filter", "Filter"),
         Binding("escape", "clear_filter", "Clear"),
-        Binding("shift+n", "toggle_normalize", "Normalize"),
         Binding("shift+w", "toggle_wrap", "Wrap"),
-        Binding("s", "sort_dialog", "Sort"),
         Binding("?", "help", "Help"),
         Binding("d", "toggle_dark", "Theme"),
         Binding("c", "column_settings", "Columns"),
@@ -879,110 +928,72 @@ class DockerTUIApp(App):
             return ""
     
     async def update_table(self) -> None:
-        """Update the data table with container info."""
+        """Update the data table with container info.
+
+        Uses in-place cell updates when the row set hasn't changed to avoid
+        resetting the DataTable's internal hover/cursor state.
+        """
         table = self.query_one("#container-table", DataTable)
-        
-        # Helpers to work across Textual versions
-        def _get_row_key_value_at(idx: int):
+
+        new_ids = [c.id for c in self.filtered_containers]
+
+        # Build ordered list of existing row key values using coordinate_to_cell_key
+        existing_ids: List[str] = []
+        row_count = getattr(table, "row_count", 0)
+        for idx in range(row_count):
             try:
-                # Preferred API
-                key = table.get_row_key(idx)  # type: ignore[attr-defined]
-                return getattr(key, "value", key)
+                cell_key = table.coordinate_to_cell_key(Coordinate(idx, 0))
+                existing_ids.append(cell_key.row_key.value)
             except Exception:
-                pass
-            try:
-                # Fallback: rows or row_keys collections
-                rows = getattr(table, "rows", None)
-                if rows is not None and 0 <= idx < len(rows):
-                    key = rows[idx]
-                    return getattr(key, "value", key)
-            except Exception:
-                pass
-            try:
-                row_keys = getattr(table, "row_keys", None)
-                if row_keys is not None and 0 <= idx < len(row_keys):
-                    key = row_keys[idx]
-                    return getattr(key, "value", key)
-            except Exception:
-                pass
-            return None
-        
-        def _set_cursor_to_key_value(key_value) -> bool:
-            try:
-                rows = getattr(table, "rows", None)
-                if rows is not None:
-                    for i, rk in enumerate(rows):
-                        if getattr(rk, "value", rk) == key_value:
-                            table.cursor_coordinate = Coordinate(i, 0)
-                            # Attempt to scroll to ensure visibility
-                            try:
-                                table.scroll_to_row(i)  # type: ignore[attr-defined]
-                            except Exception:
-                                pass
-                            return True
-            except Exception:
-                pass
-            try:
-                row_keys = getattr(table, "row_keys", None)
-                if row_keys is not None:
-                    for i, rk in enumerate(row_keys):
-                        if getattr(rk, "value", rk) == key_value:
-                            table.cursor_coordinate = Coordinate(i, 0)
-                            try:
-                                table.scroll_to_row(i)  # type: ignore[attr-defined]
-                            except Exception:
-                                pass
-                            return True
-            except Exception:
-                pass
-            # As a last resort iterate by index using get_row_key
-            try:
-                for i in range(getattr(table, "row_count", 0)):
-                    kv = _get_row_key_value_at(i)
-                    if kv == key_value:
-                        table.cursor_coordinate = Coordinate(i, 0)
-                        try:
-                            table.scroll_to_row(i)  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
-                        return True
-            except Exception:
-                pass
-            return False
-        
-        # Remember current selection (index and key)
+                existing_ids.append(None)
+
+        # Fast path: if the row keys match in order, update cells in-place
+        if existing_ids == new_ids and len(new_ids) > 0:
+            col_keys = [f"col_{i}" for i in range(len(self.columns))]
+            success = True
+            for container in self.filtered_containers:
+                row_data = self.build_row_data(container)
+                for col_idx, value in enumerate(row_data):
+                    try:
+                        table.update_cell(
+                            container.id, col_keys[col_idx], value, update_width=False
+                        )
+                    except Exception:
+                        success = False
+                        break
+                if not success:
+                    break
+            if success:
+                return
+
+        # Slow path: row set changed – full clear & rebuild with cursor restore
         current_row_index = 0
         current_key_value = None
-        if table.cursor_coordinate:
-            try:
-                current_row_index = table.cursor_coordinate.row
-            except Exception:
-                current_row_index = 0
         try:
-            current_key_value = _get_row_key_value_at(current_row_index)
+            current_row_index = table.cursor_coordinate.row
         except Exception:
-            current_key_value = None
-        
-        # Clear and rebuild table
+            current_row_index = 0
+        if 0 <= current_row_index < len(existing_ids):
+            current_key_value = existing_ids[current_row_index]
+
         table.clear()
-        
+
         for container in self.filtered_containers:
             row_data = self.build_row_data(container)
             table.add_row(*row_data, key=container.id)
-        
-        # Restore selection if possible
-        if getattr(table, "row_count", 0) > 0:
+
+        # Restore cursor position
+        if table.row_count > 0:
             restored = False
             if current_key_value is not None:
-                restored = _set_cursor_to_key_value(current_key_value)
+                for i, cid in enumerate(new_ids):
+                    if cid == current_key_value:
+                        table.cursor_coordinate = Coordinate(i, 0)
+                        restored = True
+                        break
             if not restored:
-                # Maintain relative position by index
-                new_index = min(current_row_index, table.row_count - 1)
+                new_index = min(current_row_index, max(0, table.row_count - 1))
                 table.cursor_coordinate = Coordinate(new_index, 0)
-                try:
-                    table.scroll_to_row(new_index)  # type: ignore[attr-defined]
-                except Exception:
-                    pass
     
     def _highlight_text(self, text: str, base_style: str = "") -> Text:
         """Highlight search text within a string."""
@@ -1416,7 +1427,43 @@ class DockerTUIApp(App):
         container = self.get_selected_container()
         if container:
             self.push_screen(InspectViewScreen(container))
-    
+
+    def action_stop_start(self) -> None:
+        """Stop or start the selected container."""
+        container = self.get_selected_container()
+        if container:
+            if container.status == "running":
+                asyncio.create_task(self.execute_container_action(container, "stop"))
+            else:
+                asyncio.create_task(self.execute_container_action(container, "start"))
+
+    def action_pause_unpause(self) -> None:
+        """Pause or unpause the selected container."""
+        container = self.get_selected_container()
+        if container:
+            if container.status == "paused":
+                asyncio.create_task(self.execute_container_action(container, "unpause"))
+            elif container.status == "running":
+                asyncio.create_task(self.execute_container_action(container, "pause"))
+
+    def action_restart_container(self) -> None:
+        """Restart the selected container."""
+        container = self.get_selected_container()
+        if container and container.status == "running":
+            asyncio.create_task(self.execute_container_action(container, "restart"))
+
+    def action_exec_shell(self) -> None:
+        """Exec shell into the selected container."""
+        container = self.get_selected_container()
+        if container and container.status == "running":
+            asyncio.create_task(self.execute_container_action(container, "exec"))
+
+    def action_recreate_container(self) -> None:
+        """Recreate the selected container."""
+        container = self.get_selected_container()
+        if container:
+            asyncio.create_task(self.execute_container_action(container, "recreate"))
+
     def action_focus_filter(self) -> None:
         """Show header and focus filter input."""
         self.show_header = True

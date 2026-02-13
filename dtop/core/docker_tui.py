@@ -85,6 +85,9 @@ class DockerTUI:
         self.container_history_limit = 100
         self.container_fetch_count = 0
         
+        # Mouse hover tracking
+        self.hovered_row = -1  # Row index currently under mouse cursor
+
         # Color pairs for speed indicators
         self.init_speed_colors()
     
@@ -340,6 +343,10 @@ class DockerTUI:
         curses.init_pair(8, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # resize handle
         curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_YELLOW)  # search highlight
         curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_GREEN)  # current search highlight
+        try:
+            curses.init_pair(15, curses.COLOR_WHITE, 236)  # hover row (dark gray bg)
+        except:
+            curses.init_pair(15, curses.COLOR_WHITE, curses.COLOR_BLACK)  # fallback
         
         # Initialize speed colors
         self.init_speed_colors()
@@ -453,7 +460,21 @@ class DockerTUI:
                     elif key == curses.KEY_MOUSE:
                         try:
                             _, mx, my, _, button_state = curses.getmouse()
-                            
+
+                            # Track hover on any mouse event (motion or click)
+                            content_start = 2 if self.filter_mode or self.filter_string else 1
+                            old_hover = self.hovered_row
+                            if my >= content_start and my < h - 1:
+                                hover_idx = my - content_start + self.scroll_offset
+                                if hover_idx < len(self.filtered_containers):
+                                    self.hovered_row = hover_idx
+                                else:
+                                    self.hovered_row = -1
+                            else:
+                                self.hovered_row = -1
+                            if old_hover != self.hovered_row:
+                                last_draw_time = 0  # Force redraw on hover change
+
                             # Check if click was on header row - IMPROVED SORTING
                             if my == 0 and button_state & curses.BUTTON1_CLICKED:
                                 # Find which column was clicked with improved detection
@@ -465,17 +486,14 @@ class DockerTUI:
                                     else:
                                         self.sort_column = col_idx
                                         self.sort_reverse = False
-                                    
+
                                     # Re-sort containers
                                     self.containers = self.sort_containers(self.containers)
                                     self.apply_filter()
                                     last_draw_time = 0
-                            
+
                             # Check if click was on a container row
-                            elif my > 0 and my < h - 1:
-                                # Calculate content area start
-                                content_start = 2 if self.filter_mode or self.filter_string else 1
-                                
+                            elif my > 0 and my < h - 1 and button_state & curses.BUTTON1_CLICKED:
                                 # Only process if click is in content area
                                 if my >= content_start:
                                     row_idx = my - content_start + self.scroll_offset  # Adjust for scroll offset and header(s)
@@ -501,6 +519,21 @@ class DockerTUI:
                         # Direct inspect shortcut using new module
                         from ..views import inspect_view
                         inspect_view.show_inspect(self, stdscr, self.filtered_containers[self.selected])
+                    elif key in (ord('s'), ord('S')) and self.filtered_containers:
+                        container = self.filtered_containers[self.selected]
+                        execute_action(self, stdscr, container, 's')
+                    elif key in (ord('p'), ord('P')) and self.filtered_containers:
+                        container = self.filtered_containers[self.selected]
+                        execute_action(self, stdscr, container, 'p')
+                    elif key in (ord('r'), ord('R')) and self.filtered_containers:
+                        container = self.filtered_containers[self.selected]
+                        execute_action(self, stdscr, container, 'r')
+                    elif key in (ord('f'), ord('F')) and self.filtered_containers:
+                        container = self.filtered_containers[self.selected]
+                        execute_action(self, stdscr, container, 'f')
+                    elif key in (ord('e'), ord('E')) and self.filtered_containers:
+                        container = self.filtered_containers[self.selected]
+                        execute_action(self, stdscr, container, 'e')
                     elif key in (ord('n'), ord('N')):
                         # Toggle normalization setting globally
                         self.normalize_logs = not self.normalize_logs
@@ -681,13 +714,19 @@ class DockerTUI:
                                 'UPTIME': uptime
                             }
                             
-                            # Highlight selected row with visual indicator
-                            if idx == self.selected:
-                                stdscr.attron(curses.color_pair(1))
-                                # Draw cursor indicator
-                                safe_addstr(stdscr, y, 0, "➤", curses.color_pair(1) | curses.A_BOLD)
+                            # Determine row highlight style
+                            is_selected = (idx == self.selected)
+                            is_hovered = (idx == self.hovered_row and not is_selected)
+                            if is_selected:
+                                row_color = curses.color_pair(1)
+                                stdscr.attron(row_color)
+                                safe_addstr(stdscr, y, 0, "➤", row_color | curses.A_BOLD)
+                            elif is_hovered:
+                                row_color = curses.color_pair(15)
+                                stdscr.attron(row_color)
+                                safe_addstr(stdscr, y, 0, " ", row_color)
                             else:
-                                # Space for alignment
+                                row_color = None
                                 safe_addstr(stdscr, y, 0, " ")
                             
                             # Draw each column with proper spacing
@@ -703,12 +742,12 @@ class DockerTUI:
                                     # Handle special columns
                                     if col_name == 'NET I/O':
                                         # Draw NET I/O with colors
-                                        if idx == self.selected:
-                                            # For selected row, use selection color
+                                        if is_selected or is_hovered:
+                                            # For selected/hovered row, use row color
                                             net_io = f"{format_bytes(net_in_rate, '/s')}↓ {format_bytes(net_out_rate, '/s')}↑"
-                                            safe_addstr(stdscr, y, col_positions[i], 
-                                                       format_column(net_io, col_width, col['align']), 
-                                                       curses.color_pair(1))
+                                            safe_addstr(stdscr, y, col_positions[i],
+                                                       format_column(net_io, col_width, col['align']),
+                                                       row_color)
                                         else:
                                             # Draw with colors
                                             x_pos = col_positions[i]
@@ -747,12 +786,12 @@ class DockerTUI:
                                     
                                     elif col_name == 'DISK I/O':
                                         # Draw DISK I/O with colors
-                                        if idx == self.selected:
-                                            # For selected row, use selection color
+                                        if is_selected or is_hovered:
+                                            # For selected/hovered row, use row color
                                             disk_io = f"{format_bytes(disk_read_rate, '/s')}R {format_bytes(disk_write_rate, '/s')}W"
-                                            safe_addstr(stdscr, y, col_positions[i], 
-                                                       format_column(disk_io, col_width, col['align']), 
-                                                       curses.color_pair(1))
+                                            safe_addstr(stdscr, y, col_positions[i],
+                                                       format_column(disk_io, col_width, col['align']),
+                                                       row_color)
                                         else:
                                             # Draw with colors
                                             x_pos = col_positions[i]
@@ -791,29 +830,34 @@ class DockerTUI:
                                     
                                     elif col_name in row_data and row_data[col_name] is not None:
                                         col_text = row_data[col_name]
-                                        
-                                        # Apply status color only to the status column when not selected
-                                        attr = status_color if col_name == 'STATUS' and idx != self.selected else curses.A_NORMAL
-                                        
-                                        if idx == self.selected:
-                                            attr = curses.color_pair(1)  # Use selection color for all columns
-                                        
+
+                                        if is_selected:
+                                            attr = row_color
+                                        elif is_hovered:
+                                            attr = row_color
+                                        elif col_name == 'STATUS':
+                                            attr = status_color
+                                        else:
+                                            attr = curses.A_NORMAL
+
                                         # Draw column content
-                                        safe_addstr(stdscr, y, col_positions[i], 
+                                        safe_addstr(stdscr, y, col_positions[i],
                                                        format_column(col_text, col_width, col['align']), attr)
                                     
                                     # Draw separator after column (except last)
                                     if self.show_column_separators and i < len(self.columns) - 1:
                                         sep_pos = col_positions[i] + col_width
-                                        sep_attr = curses.color_pair(1) if idx == self.selected else curses.A_NORMAL
+                                        sep_attr = row_color if row_color else curses.A_NORMAL
                                         safe_addstr(stdscr, y, sep_pos, self.column_separator, sep_attr)
-                            
-                            if idx == self.selected:
+
+                            if is_selected:
                                 stdscr.attroff(curses.color_pair(1))
+                            elif is_hovered:
+                                stdscr.attroff(curses.color_pair(15))
 
                     # Draw footer with help text - UPDATED with new shortcuts
                     stdscr.attron(curses.color_pair(6))
-                    footer_text = " ↑/↓:Navigate | PgUp/Dn:5 Lines | Home/End:Top/Bottom | Enter:Menu | L:Logs | I:Inspect | \\:Filter | Q:Quit "
+                    footer_text = " ↑/↓:Nav | Enter:Menu | L:Logs | I:Inspect | S:Stop/Start | P:Pause | R:Restart | E:Exec | F:Recreate | \\:Filter | Q:Quit "
                     footer_fill = " " * (w - len(footer_text))
                     safe_addstr(stdscr, h-1, 0, footer_text + footer_fill, curses.color_pair(6))
                     stdscr.attroff(curses.color_pair(6))

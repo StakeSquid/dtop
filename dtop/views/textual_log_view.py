@@ -323,20 +323,25 @@ class LogViewScreen(Screen):
     }
     
     #log-header {
-        height: 2;
+        height: 3;
         background: $panel;
         border-bottom: solid $primary;
         dock: top;
         padding: 0 1;
-        content-align: left middle;
     }
-    
+
     #container-name {
-        width: 20;
+        width: 100%;
         text-style: bold;
-        margin: 0 1;
+        text-align: center;
+        height: 1;
     }
-    
+
+    #header-controls {
+        height: 1;
+        layout: horizontal;
+    }
+
     .search-input {
         width: 20;
         height: 1;
@@ -344,7 +349,7 @@ class LogViewScreen(Screen):
         padding: 0;
         border: none;
     }
-    
+
     .filter-input {
         width: 20;
         height: 1;
@@ -352,13 +357,13 @@ class LogViewScreen(Screen):
         padding: 0;
         border: none;
     }
-    
+
     #status-compact {
         width: 12;
         color: $text-muted;
         margin: 0 1;
     }
-    
+
     #log-stats {
         width: 1fr;
         text-align: right;
@@ -409,7 +414,7 @@ class LogViewScreen(Screen):
     # Reactive properties
     normalize_enabled = reactive(True)
     wrap_enabled = reactive(True)
-    show_timestamps = reactive(True)
+    show_timestamps = reactive(False)
     search_term = reactive("")
     filter_term = reactive("")
     current_match_index = reactive(0)
@@ -445,12 +450,13 @@ class LogViewScreen(Screen):
         yield Footer()
         
         # Header docked at top
-        with Horizontal(id="log-header"):
-            yield Label(f"{self.container.name[:15]}", id="container-name")
-            yield Input(placeholder="Search", id="search-input", classes="search-input")
-            yield Input(placeholder="Filter", id="filter-input", classes="filter-input")
-            yield Label(f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'} F:{'ON' if self.is_following else 'OFF'}", id="status-compact")
-            yield Label("", id="log-stats")
+        with Vertical(id="log-header"):
+            yield Label(f"Logs: {self.container.name}", id="container-name")
+            with Horizontal(id="header-controls"):
+                yield Input(placeholder="Search", id="search-input", classes="search-input")
+                yield Input(placeholder="Filter", id="filter-input", classes="filter-input")
+                yield Label(f"N:{'Y' if self.normalize_enabled else 'N'} W:{'Y' if self.wrap_enabled else 'N'} F:{'ON' if self.is_following else 'OFF'}", id="status-compact")
+                yield Label("", id="log-stats")
         
         # Log content fills remaining space
         yield RichLog(highlight=True, markup=True, wrap=self.wrap_enabled, id="log-content")
