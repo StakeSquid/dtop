@@ -21,7 +21,7 @@ A terminal UI for managing and monitoring Docker containers. Real-time stats, ad
 - **Container inspector** — Tree and JSON views with search, expand/collapse, and path/value copy
 - **Keyboard-first** — Every action has a shortcut; mouse is fully supported too
 - **Customizable columns** — Adjust widths, set min/max, reorder via config or the built-in editor
-- **Dark/light themes** — Toggle with a single key
+- **Preset + custom themes** — Cycle presets or define fully custom palettes and semantic colors
 - **Responsive layout** — Columns auto-size to terminal width based on weight
 - **Persistent config** — Column settings saved to `~/.docker_tui.json`
 - **Legacy mode** — Falls back to a curses interface with `--legacy`
@@ -79,7 +79,8 @@ dtop --debug      # Debug mode with full tracebacks
 | `N` | Next search match |
 | `Escape` | Clear search/filter |
 | `C` | Column settings |
-| `D` | Toggle dark/light theme |
+| `D` | Cycle theme presets (includes custom theme when configured) |
+| `T` | Open theme editor (edit/save custom theme in-app) |
 | `?` | Help |
 | `Q` | Quit |
 
@@ -170,6 +171,55 @@ Each column has: `name`, `width`, `min_width`, `max_width`, `weight`, and `align
 ```
 
 Columns with a higher `weight` expand first when the terminal is wide. Columns with `weight: 0` stay at their minimum unless extra space allows growth.
+
+### Custom Theme Configuration
+
+You can define a fully custom Textual theme plus semantic runtime colors (status labels, search highlights, log severity colors, etc.) in the same config file.
+
+Set `"theme": "dtop-custom"` to activate it, then provide `custom_theme`:
+
+```json
+{
+  "theme": "dtop-custom",
+  "custom_theme": {
+    "primary": "#3b82f6",
+    "secondary": "#22c55e",
+    "warning": "#f59e0b",
+    "error": "#ef4444",
+    "success": "#10b981",
+    "accent": "#06b6d4",
+    "foreground": "#e5e7eb",
+    "background": "#0b1020",
+    "surface": "#121a2f",
+    "panel": "#1a2542",
+    "boost": "#0f172a",
+    "dark": true,
+    "luminosity_spread": 0.15,
+    "text_alpha": 0.95,
+    "semantic_colors": {
+      "status_running": "green",
+      "status_stopped": "red",
+      "status_paused": "yellow",
+      "connection_ok": "green",
+      "connection_error": "red",
+      "warning_text": "yellow",
+      "error_text": "red",
+      "info_text": "blue",
+      "muted_text": "dim",
+      "timestamp_text": "dim cyan",
+      "inspect_bool": "cyan",
+      "inspect_number": "magenta",
+      "inspect_string": "green",
+      "search_highlight": "reverse yellow",
+      "search_highlight_case": "reverse bold yellow"
+    }
+  }
+}
+```
+
+If `custom_theme` is invalid or missing required values, `dtop` safely falls back to built-in themes.
+
+Tip: you can edit and save these values directly inside `dtop` with `T`.
 
 ## Troubleshooting
 
