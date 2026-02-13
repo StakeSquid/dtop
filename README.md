@@ -6,10 +6,12 @@
 
 A terminal UI for managing and monitoring Docker containers. Real-time stats, advanced log viewing, container lifecycle control, and full keyboard-driven workflow.
 
-<img width="1611" alt="Screenshot 2025-05-24 at 6 39 12 PM" src="https://github.com/user-attachments/assets/e5697f99-fdd4-4d41-bd69-02072db5385c" />
-<img width="1611" alt="Screenshot 2025-05-24 at 6 39 21 PM" src="https://github.com/user-attachments/assets/0694304e-f256-47b5-923b-5c05ed0035b7" />
-<img width="1611" alt="Screenshot 2025-05-24 at 6 39 48 PM" src="https://github.com/user-attachments/assets/df379064-9f33-48f7-9e8b-635723df6572" />
-<img width="1611" alt="Screenshot 2025-05-24 at 6 40 01 PM" src="https://github.com/user-attachments/assets/aeb20e8e-202c-49f8-bd09-7b563964bb9e" />
+<img width="2214" height="646" alt="image" src="https://github.com/user-attachments/assets/e468135e-4c6e-483d-a282-907db088ae77" />
+<img width="2213" height="822" alt="image" src="https://github.com/user-attachments/assets/e2dbe385-6922-4bb7-b896-6679e703549d" />
+<img width="770" height="164" alt="image" src="https://github.com/user-attachments/assets/ada5da1f-9888-4408-a621-e0088980f2c1" />
+<img width="1149" height="361" alt="image" src="https://github.com/user-attachments/assets/8ac930d5-a5a8-47af-9e9e-b25fb2e5058d" />
+<img width="2211" height="951" alt="image" src="https://github.com/user-attachments/assets/29c3ff81-fa1d-484c-9fc2-5288e04b2020" />
+
 
 ## Features
 
