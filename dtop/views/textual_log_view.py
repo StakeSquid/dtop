@@ -400,6 +400,7 @@ class LogViewScreen(Screen):
         Binding("r", "show_time_filter", "Time Filter"),
         Binding("e", "export_logs", "Export"),
         Binding("s", "toggle_case_sensitive", "Case Toggle"),
+        Binding("d", "cycle_theme", "Theme"),
         Binding("pageup", "page_up", "Page Up", show=False),
         Binding("pagedown", "page_down", "Page Down", show=False),
         Binding("home", "go_top", "Home", show=False),
@@ -1285,6 +1286,13 @@ class LogViewScreen(Screen):
                 self.export_logs_to_file(result)
         
         self.app.push_screen(ExportDialog(), handle_result)
+
+    def action_cycle_theme(self) -> None:
+        """Cycle app theme using the same behavior as the main table view."""
+        if hasattr(self.app, "action_cycle_theme"):
+            self.app.action_cycle_theme()
+        elif hasattr(self.app, "action_toggle_dark"):
+            self.app.action_toggle_dark()
     
     def export_logs_to_file(self, export_config: dict) -> None:
         """Export logs to file with metadata."""

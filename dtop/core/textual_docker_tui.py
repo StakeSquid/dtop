@@ -1711,6 +1711,30 @@ class DockerTUIApp(App):
         self.theme = next_theme
         save_theme(next_theme)
         self.notify(f"Theme: {next_theme}", timeout=1)
+
+    def action_toggle_dark(self) -> None:
+        """Backward-compatible dark toggle for older keymaps/actions."""
+        dark_theme = "textual-dark"
+        light_theme = "textual-light"
+        current = self.theme or self._initial_theme
+
+        if current == dark_theme:
+            next_theme = light_theme
+        elif current == light_theme:
+            next_theme = dark_theme
+        else:
+            # For custom/preset themes, infer target from current theme darkness.
+            try:
+                current_theme = self.available_themes.get(current)
+                is_dark = bool(current_theme.dark) if current_theme else True
+            except Exception:
+                is_dark = True
+            next_theme = light_theme if is_dark else dark_theme
+
+        if next_theme in self.available_themes:
+            self.theme = next_theme
+            save_theme(next_theme)
+            self.notify(f"Theme: {next_theme}", timeout=1)
     
     def action_help(self) -> None:
         """Show help."""
