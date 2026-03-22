@@ -3,7 +3,7 @@ dtop - Docker Terminal UI
 A high-performance terminal UI for Docker container management.
 """
 
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 __author__ = "StakeSquid"
 __description__ = "A high-performance terminal UI for Docker container management"
 

@@ -27,15 +27,6 @@ import time
 import json
 
 
-class NormalizeLogsRequest(Message):
-    """Ask to normalize raw log lines off-thread; request_id drops stale completions."""
-
-    def __init__(self, lines: List[str], request_id: int) -> None:
-        self.lines = lines
-        self.request_id = request_id
-        super().__init__()
-
-
 def _split_docker_log_timestamp(line: str) -> Tuple[str, str]:
     """Split a Docker log line into (timestamp_token, message). token may be empty."""
     if not line:
@@ -50,17 +41,21 @@ def _split_docker_log_timestamp(line: str) -> Tuple[str, str]:
     return "", line
 
 
-def _normalize_logs_subprocess(logs: List[str], normalize_script: str) -> List[str]:
-    """Run normalize script; intended for worker threads (blocking subprocess I/O)."""
+def _normalize_logs_subprocess(
+    logs: List[str], normalize_script: str
+) -> Tuple[List[str], Optional[str]]:
+    """Run normalize script off the UI thread. Returns (lines, warning_or_none)."""
     if not logs:
-        return logs
+        return logs, None
     if not os.path.exists(normalize_script):
-        return logs
+        return logs, f"Normalize script not found: {normalize_script}"
     if not os.access(normalize_script, os.X_OK):
         try:
             os.chmod(normalize_script, 0o755)
         except OSError:
-            return logs
+            return logs, "Could not make normalize script executable; showing raw lines."
+    line_count = len(logs)
+    timeout = min(60.0, max(5.0, 3.0 + line_count / 2000.0))
     try:
         log_text = "\n".join(logs)
         process = subprocess.Popen(
@@ -70,16 +65,22 @@ def _normalize_logs_subprocess(logs: List[str], normalize_script: str) -> List[s
             stderr=subprocess.PIPE,
             text=True,
         )
-        stdout, _stderr = process.communicate(input=log_text, timeout=3)
+        stdout, stderr = process.communicate(input=log_text, timeout=timeout)
         if process.returncode != 0:
-            return logs
+            err = (stderr or "").strip()[:200]
+            msg = f"Normalize script exited with code {process.returncode}"
+            if err:
+                msg += f": {err}"
+            return logs, msg
         if stdout:
             normalized = stdout.splitlines()
             if normalized:
-                return normalized
-        return logs
-    except (subprocess.TimeoutExpired, Exception):
-        return logs
+                return normalized, None
+        return logs, None
+    except subprocess.TimeoutExpired:
+        return logs, "Log normalization timed out; showing raw lines."
+    except Exception as e:
+        return logs, f"Normalize error: {e}"
 
 
 class TimeFilterDialog(ModalScreen):
@@ -741,36 +742,51 @@ class LogViewScreen(Screen):
             return
         if self.normalize_enabled:
             self._normalize_latest_id += 1
-            self.post_message(
-                NormalizeLogsRequest(list(self.raw_logs), self._normalize_latest_id)
+            request_id = self._normalize_latest_id
+
+            async def _normalize_run() -> None:
+                await self._normalize_logs_worker(request_id)
+
+            self.run_worker(
+                _normalize_run,
+                name="log_normalize",
+                group="log_normalize",
+                exclusive=True,
+                thread=False,
+                exit_on_error=False,
             )
             return
         self._process_and_display_logs_inline()
 
-    @on(NormalizeLogsRequest)
-    async def handle_normalize_logs_request(self, message: NormalizeLogsRequest) -> None:
-        if message.request_id != self._normalize_latest_id:
+    async def _normalize_logs_worker(self, request_id: int) -> None:
+        """Background normalize; does not block the screen message pump."""
+        if request_id != self._normalize_latest_id:
+            return
+        lines = list(self.raw_logs)
+        if request_id != self._normalize_latest_id:
             return
         try:
             if hasattr(asyncio, "to_thread"):
-                normalized = await asyncio.to_thread(
-                    _normalize_logs_subprocess,
-                    message.lines,
-                    self.normalize_script,
+                normalized, warning = await asyncio.to_thread(
+                    _normalize_logs_subprocess, lines, self.normalize_script
                 )
             else:
                 loop = asyncio.get_running_loop()
-                normalized = await loop.run_in_executor(
-                    None,
-                    lambda: _normalize_logs_subprocess(
-                        message.lines, self.normalize_script
-                    ),
-                )
+                ns = self.normalize_script
+
+                def _run() -> Tuple[List[str], Optional[str]]:
+                    return _normalize_logs_subprocess(lines, ns)
+
+                normalized, warning = await loop.run_in_executor(None, _run)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             self.app.notify(f"Normalize failed: {e}", severity="error")
             return
-        if message.request_id != self._normalize_latest_id:
+        if request_id != self._normalize_latest_id:
             return
+        if warning:
+            self.app.notify(warning, severity="warning")
         self._apply_normalized_and_render(normalized)
 
     def _merge_docker_timestamps_into_processed(self) -> None:
@@ -829,7 +845,8 @@ class LogViewScreen(Screen):
 
     def normalize_logs(self, logs: List[str]) -> List[str]:
         """Normalize log lines using the normalize script (blocking; prefer worker path)."""
-        return _normalize_logs_subprocess(logs, self.normalize_script)
+        lines, _warning = _normalize_logs_subprocess(logs, self.normalize_script)
+        return lines
     
     def filter_logs(self, logs: List[str], filter_expr: str) -> List[str]:
         """Filter logs based on expression."""

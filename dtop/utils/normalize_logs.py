@@ -206,28 +206,59 @@ def process_walrus_line(obj):
     return line
 
 
+def _write_out(s: str) -> None:
+    """Write one line to stdout; tolerate closed pipe and encoding issues."""
+    try:
+        print(s, flush=True)
+    except BrokenPipeError:
+        try:
+            sys.stdout.close()
+        except Exception:
+            pass
+        raise SystemExit(0) from None
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        sys.stdout.buffer.write((s + "\n").encode(enc, errors="replace"))
+        sys.stdout.buffer.flush()
+
+
 def main():
     for line in sys.stdin:
         # Strip ANSI color codes and newline
-        line = strip_ansi(line.rstrip('\n'))
+        line = strip_ansi(line.rstrip("\n"))
         try:
             obj = json.loads(line)
-            if 'fields' in obj and isinstance(obj['fields'], dict):
-                print(process_walrus_line(obj))
-            elif 'level' in obj and 'time' in obj:
-                print(process_alt_json_line(obj))
-            elif 'severity' in obj and 'timestamp' in obj:
-                print(process_json_line(obj))
-            else:
-                print(line)
-            continue
         except json.JSONDecodeError:
-            pass
-        if line.startswith('t=') or line.startswith('lvl='):
-            print(process_kv_line(line))
+            obj = None
+
+        if isinstance(obj, dict):
+            try:
+                if "fields" in obj and isinstance(obj["fields"], dict):
+                    _write_out(process_walrus_line(obj))
+                elif "level" in obj and "time" in obj:
+                    _write_out(process_alt_json_line(obj))
+                elif "severity" in obj and "timestamp" in obj:
+                    _write_out(process_json_line(obj))
+                else:
+                    _write_out(line)
+            except Exception:
+                _write_out(line)
+            continue
+
+        if obj is not None:
+            # Valid JSON but not a dict (number, string, array, true, false, null)
+            _write_out(line)
+            continue
+
+        if line.startswith("t=") or line.startswith("lvl="):
+            try:
+                _write_out(process_kv_line(line))
+            except Exception:
+                _write_out(line)
             continue
         # Already formatted plain text
-        print(line)
+        _write_out(line)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
