@@ -33,7 +33,13 @@ from textual.coordinate import Coordinate
 from textual.theme import Theme
 from rich.text import Text
 
-from ..utils.utils import format_bytes, format_datetime, format_timedelta, container_image_label
+from ..utils.utils import (
+    format_bytes,
+    format_datetime,
+    format_timedelta,
+    container_image_label,
+    build_image_repo_by_digest,
+)
 from ..utils.config import (
     load_config,
     save_config,
@@ -109,13 +115,24 @@ def _prepare_docker_exec_command(container: Any) -> Tuple[Optional[List[str]], O
         return None, str(e)
 
 
-def _simple_recreate_sync(docker_client: Any, container: Any) -> Tuple[Optional[Exception], Optional[str]]:
+def _fetch_containers_and_repo_map(client: Any) -> Tuple[List[Any], Dict[str, str]]:
+    """Blocking: list containers and build digest→repo tag map (one images.list)."""
+    containers = client.containers.list(all=True)
+    repo_map = build_image_repo_by_digest(client)
+    return containers, repo_map
+
+
+def _simple_recreate_sync(
+    docker_client: Any,
+    container: Any,
+    repo_map: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[Exception], Optional[str]]:
     """Stop, remove, and re-create a container (blocking; run via `_docker_run`)."""
     try:
         container_info = container.attrs
         config = container_info.get("Config", {})
         host_config = container_info.get("HostConfig", {})
-        image_name = container_image_label(container)
+        image_name = container_image_label(container, repo_map)
         if image_name == "<none>":
             return ValueError("Could not resolve container image from attrs"), None
         container_name = container.name
@@ -563,7 +580,7 @@ class ContainerActionModal(ModalScreen):
             with ScrollableContainer(id="action-list"):
                 # Information section
                 yield Static(
-                    f"Image: {container_image_label(self.container)}",
+                    f"Image: {self.app._image_label(self.container)}",
                     classes="info-text",
                 )
                 yield Static(f"Status: {self.container.status}", classes="info-text")
@@ -814,6 +831,7 @@ class DockerTUIApp(App):
         self.stats_cache = {}
         self._stats_table_debounce_task: Optional[asyncio.Task] = None
         self._stats_display_cache: Dict[Tuple[str, str], str] = {}
+        self._digest_repo_map: Dict[str, str] = {}
         self.columns = load_config()
         self._semantic_colors = DEFAULT_SEMANTIC_COLORS.copy()
         self._register_custom_theme_if_configured()
@@ -843,6 +861,10 @@ class DockerTUIApp(App):
                 return func()
 
         return await loop.run_in_executor(None, _call)
+
+    def _image_label(self, container: Any) -> str:
+        """Human-friendly image name using attrs + digest map from last refresh."""
+        return container_image_label(container, self._digest_repo_map)
 
     def _register_custom_theme_if_configured(self) -> None:
         """Register a user-defined theme from config when present."""
@@ -1174,7 +1196,9 @@ class DockerTUIApp(App):
         try:
             # Always get all containers (blocking Docker SDK → thread pool)
             client = self.docker_client
-            self.containers = await self._docker_run(client.containers.list, all=True)
+            self.containers, self._digest_repo_map = await self._docker_run(
+                _fetch_containers_and_repo_map, client
+            )
 
             # Build container map for quick lookup
             self.container_map = {c.id: c for c in self.containers}
@@ -1213,7 +1237,7 @@ class DockerTUIApp(App):
             filtered = [
                 c for c in filtered
                 if filter_lower in c.name.lower()
-                or filter_lower in container_image_label(c).lower()
+                or filter_lower in self._image_label(c).lower()
                 or filter_lower in c.status.lower()
                 or filter_lower in c.short_id.lower()
             ]
@@ -1239,7 +1263,7 @@ class DockerTUIApp(App):
         if col_name == 'NAME':
             return container.name.lower()
         elif col_name == 'IMAGE':
-            return container_image_label(container).lower()
+            return self._image_label(container).lower()
         elif col_name == 'STATUS':
             return container.status.lower()
         elif col_name == 'CPU%':
@@ -1447,7 +1471,7 @@ class DockerTUIApp(App):
             if col_name == 'NAME':
                 row_data.append(self._highlight_text(container.name))
             elif col_name == 'IMAGE':
-                image = container_image_label(container)
+                image = self._image_label(container)
                 row_data.append(self._highlight_text(image))
             elif col_name == 'STATUS':
                 status = container.status
@@ -1599,7 +1623,7 @@ class DockerTUIApp(App):
         s = self.search_text.lower()
         for c in self.filtered_containers:
             try:
-                image = container_image_label(c)
+                image = self._image_label(c)
                 if image == "<none>":
                     image = ""
             except Exception:
@@ -2085,7 +2109,10 @@ class DockerTUIApp(App):
         try:
             self.notify(f"Recreating {container.name}...", timeout=2)
             err, container_name = await self._docker_run(
-                _simple_recreate_sync, self.docker_client, container
+                _simple_recreate_sync,
+                self.docker_client,
+                container,
+                self._digest_repo_map,
             )
             if err:
                 self.notify(f"Failed to recreate container: {err}", severity="error")
@@ -2416,7 +2443,7 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
             
             # Info section
             with Container(id="info-section"):
-                image_name = container_image_label(self.container)
+                image_name = self.app._image_label(self.container)
                 if image_name == "<none>":
                     image_name = getattr(self.container, "short_id", "?")
                 yield Label(f"Image: {image_name}", classes="info-label")

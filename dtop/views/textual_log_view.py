@@ -4,6 +4,7 @@ Docker TUI - Textual Log View
 -----------
 Advanced log viewer using Textual with search, filter, and normalization.
 """
+import asyncio
 import re
 import subprocess
 import os
@@ -24,6 +25,15 @@ from rich.text import Text
 from rich.syntax import Syntax
 import time
 import json
+
+
+class NormalizeLogsRequest(Message):
+    """Ask to normalize raw log lines off-thread; request_id drops stale completions."""
+
+    def __init__(self, lines: List[str], request_id: int) -> None:
+        self.lines = lines
+        self.request_id = request_id
+        super().__init__()
 
 
 def _split_docker_log_timestamp(line: str) -> Tuple[str, str]:
@@ -485,6 +495,7 @@ class LogViewScreen(Screen):
         self.last_log_time = time.time()
         self.log_update_interval = 2.0
         self._last_raw_len = 0
+        self._normalize_latest_id = 0
 
         # Path to normalize script
         self.normalize_script = os.path.join(
@@ -729,9 +740,38 @@ class LogViewScreen(Screen):
             self.update_stats()
             return
         if self.normalize_enabled:
-            self._worker_normalize_logs(list(self.raw_logs))
+            self._normalize_latest_id += 1
+            self.post_message(
+                NormalizeLogsRequest(list(self.raw_logs), self._normalize_latest_id)
+            )
             return
         self._process_and_display_logs_inline()
+
+    @on(NormalizeLogsRequest)
+    async def handle_normalize_logs_request(self, message: NormalizeLogsRequest) -> None:
+        if message.request_id != self._normalize_latest_id:
+            return
+        try:
+            if hasattr(asyncio, "to_thread"):
+                normalized = await asyncio.to_thread(
+                    _normalize_logs_subprocess,
+                    message.lines,
+                    self.normalize_script,
+                )
+            else:
+                loop = asyncio.get_running_loop()
+                normalized = await loop.run_in_executor(
+                    None,
+                    lambda: _normalize_logs_subprocess(
+                        message.lines, self.normalize_script
+                    ),
+                )
+        except Exception as e:
+            self.app.notify(f"Normalize failed: {e}", severity="error")
+            return
+        if message.request_id != self._normalize_latest_id:
+            return
+        self._apply_normalized_and_render(normalized)
 
     def _merge_docker_timestamps_into_processed(self) -> None:
         if not self.show_timestamps or not self.raw_logs_with_timestamps:
@@ -786,11 +826,6 @@ class LogViewScreen(Screen):
                 log_widget.scroll_end()
             except Exception:
                 pass
-
-    @work(thread=True)
-    def _worker_normalize_logs(self, snap_plain: List[str]) -> None:
-        normalized = _normalize_logs_subprocess(snap_plain, self.normalize_script)
-        self.app.call_from_thread(self._apply_normalized_and_render, normalized)
 
     def normalize_logs(self, logs: List[str]) -> List[str]:
         """Normalize log lines using the normalize script (blocking; prefer worker path)."""
