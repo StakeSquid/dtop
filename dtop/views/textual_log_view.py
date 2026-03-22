@@ -26,6 +26,52 @@ import time
 import json
 
 
+def _split_docker_log_timestamp(line: str) -> Tuple[str, str]:
+    """Split a Docker log line into (timestamp_token, message). token may be empty."""
+    if not line:
+        return "", ""
+    if "Z " in line:
+        z = line.index("Z ")
+        return line[: z + 1], line[z + 3 :]
+    if " " in line and line[0].isdigit():
+        prefix, rest = line.split(" ", 1)
+        if "T" in prefix and len(prefix) >= 10:
+            return prefix, rest
+    return "", line
+
+
+def _normalize_logs_subprocess(logs: List[str], normalize_script: str) -> List[str]:
+    """Run normalize script; intended for worker threads (blocking subprocess I/O)."""
+    if not logs:
+        return logs
+    if not os.path.exists(normalize_script):
+        return logs
+    if not os.access(normalize_script, os.X_OK):
+        try:
+            os.chmod(normalize_script, 0o755)
+        except OSError:
+            return logs
+    try:
+        log_text = "\n".join(logs)
+        process = subprocess.Popen(
+            [sys.executable, normalize_script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, _stderr = process.communicate(input=log_text, timeout=3)
+        if process.returncode != 0:
+            return logs
+        if stdout:
+            normalized = stdout.splitlines()
+            if normalized:
+                return normalized
+        return logs
+    except (subprocess.TimeoutExpired, Exception):
+        return logs
+
+
 class TimeFilterDialog(ModalScreen):
     """Dialog for setting time range filter."""
     
@@ -438,7 +484,8 @@ class LogViewScreen(Screen):
         self.max_lines = 25000  # Maximum lines to keep in memory
         self.last_log_time = time.time()
         self.log_update_interval = 2.0
-        
+        self._last_raw_len = 0
+
         # Path to normalize script
         self.normalize_script = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), 
@@ -527,60 +574,38 @@ class LogViewScreen(Screen):
     
     @work(thread=True)
     def load_initial_logs(self) -> None:
-        """Load initial container logs."""
+        """Load initial container logs (single Docker API call with timestamps)."""
         try:
-            # Get logs both with and without timestamps
-            log_params = {
-                'follow': False
-            }
-            
+            log_params: Dict[str, object] = {"follow": False, "timestamps": True}
             if self.tail_lines > 0:
-                log_params['tail'] = self.tail_lines
-            
-            # Fetch logs without timestamps for normalization
-            logs = self.container.logs(**log_params).decode('utf-8', errors='replace')
-            
-            # Also fetch with timestamps for display
-            log_params['timestamps'] = True
-            logs_with_ts = self.container.logs(**log_params).decode('utf-8', errors='replace')
-            
-            # Limit to max_lines to prevent memory issues
-            lines = logs.strip().split('\n') if logs else []
-            lines_with_ts = logs_with_ts.strip().split('\n') if logs_with_ts else []
-            
-            if len(lines) > self.max_lines:
-                lines = lines[-self.max_lines:]
-                lines_with_ts = lines_with_ts[-self.max_lines:]
-                logs = '\n'.join(lines)
-                logs_with_ts = '\n'.join(lines_with_ts)
-            
-            # Call the handler with both versions
-            self.app.call_from_thread(self.handle_logs_loaded, (logs, logs_with_ts), True, False)
+                log_params["tail"] = self.tail_lines
+            raw = self.container.logs(**log_params).decode("utf-8", errors="replace")
+            lines_ts = raw.strip().split("\n") if raw else []
+            plain = [_split_docker_log_timestamp(line)[1] for line in lines_ts]
+            if len(plain) > self.max_lines:
+                plain = plain[-self.max_lines :]
+                lines_ts = lines_ts[-self.max_lines :]
+            self.app.call_from_thread(self.handle_logs_loaded, (plain, lines_ts), True, False)
         except Exception as e:
-            self.app.call_from_thread(self.handle_logs_loaded, f"Error loading logs: {e}", False, True)
-    
+            self.app.call_from_thread(
+                self.handle_logs_loaded, f"Error loading logs: {e}", False, True
+            )
+
     @work(thread=True)
     def refresh_logs(self) -> None:
-        """Refresh logs periodically if following."""
-        # Worker should only run when following; UI thread ensures that.
-        
+        """Refresh logs periodically if following (single API call)."""
         try:
-            # Get new logs since last refresh
-            log_params = {
-                'tail': min(100, self.tail_lines) if self.tail_lines > 0 else 100,
-                'follow': False
+            log_params: Dict[str, object] = {
+                "tail": min(100, self.tail_lines) if self.tail_lines > 0 else 100,
+                "follow": False,
+                "timestamps": True,
             }
-            
-            # Fetch without timestamps for normalization
-            logs = self.container.logs(**log_params).decode('utf-8', errors='replace')
-            
-            # Also fetch with timestamps
-            log_params['timestamps'] = True
-            logs_with_ts = self.container.logs(**log_params).decode('utf-8', errors='replace')
-            
-            self.app.call_from_thread(self.handle_logs_loaded, (logs, logs_with_ts), False, False)
-        except:
-            pass  # Silently fail on refresh errors
+            raw = self.container.logs(**log_params).decode("utf-8", errors="replace")
+            lines_ts = raw.strip().split("\n") if raw else []
+            plain = [_split_docker_log_timestamp(line)[1] for line in lines_ts]
+            self.app.call_from_thread(self.handle_logs_loaded, (plain, lines_ts), False, False)
+        except Exception:
+            pass
     
     class LogsLoaded(Message):
         """Message when logs are loaded."""
@@ -596,167 +621,180 @@ class LogViewScreen(Screen):
             log_widget = self.query_one("#log-content", RichLog)
             log_widget.write(Text(logs, style=self._semantic_color("error_text", "red")))
             return
-        
-        # Unpack both versions if we have them
+
         if isinstance(logs, tuple):
             logs_plain, logs_with_ts = logs
+            if isinstance(logs_plain, str):
+                new_lines = logs_plain.strip().split("\n") if logs_plain else []
+                new_lines_with_ts = logs_with_ts.strip().split("\n") if logs_with_ts else []
+            else:
+                new_lines = list(logs_plain) if logs_plain else []
+                new_lines_with_ts = list(logs_with_ts) if logs_with_ts else []
         else:
-            # Fallback for error messages
-            logs_plain = logs
-            logs_with_ts = logs
-        
-        # Parse and store logs
-        new_lines = logs_plain.strip().split('\n') if logs_plain else []
-        new_lines_with_ts = logs_with_ts.strip().split('\n') if logs_with_ts else []
-        
+            new_lines = str(logs).strip().split("\n") if logs else []
+            new_lines_with_ts = []
+
+        trimmed = False
         if initial:
             self.raw_logs = new_lines
             self.raw_logs_with_timestamps = new_lines_with_ts
+            self._last_raw_len = len(self.raw_logs)
+            self.process_and_display_logs()
+            return
+
+        prev_len = len(self.raw_logs)
+        if self.raw_logs and new_lines:
+            last_existing = self.raw_logs[-1] if self.raw_logs else ""
+            new_start = 0
+            for i, line in enumerate(new_lines):
+                if line == last_existing:
+                    new_start = i + 1
+                    break
+            if new_start < len(new_lines):
+                truly_new = new_lines[new_start:]
+                truly_new_with_ts = new_lines_with_ts[new_start:]
+                self.raw_logs.extend(truly_new)
+                self.raw_logs_with_timestamps.extend(truly_new_with_ts)
         else:
-            # Check for duplicates before adding
-            if self.raw_logs and new_lines:
-                # Find where new logs actually start (avoid duplicates)
-                last_existing = self.raw_logs[-1] if self.raw_logs else ""
-                new_start = 0
-                
-                for i, line in enumerate(new_lines):
-                    if line == last_existing:
-                        new_start = i + 1
-                        break
-                
-                if new_start < len(new_lines):
-                    truly_new = new_lines[new_start:]
-                    truly_new_with_ts = new_lines_with_ts[new_start:]
-                    self.raw_logs.extend(truly_new)
-                    self.raw_logs_with_timestamps.extend(truly_new_with_ts)
-            else:
-                self.raw_logs.extend(new_lines)
-                self.raw_logs_with_timestamps.extend(new_lines_with_ts)
-            
-            # Trim old logs if exceeding limit
-            if len(self.raw_logs) > self.max_lines:
-                self.raw_logs = self.raw_logs[-self.max_lines:]
-                self.raw_logs_with_timestamps = self.raw_logs_with_timestamps[-self.max_lines:]
-        
-        # Process and display logs
+            self.raw_logs.extend(new_lines)
+            self.raw_logs_with_timestamps.extend(new_lines_with_ts)
+
+        if len(self.raw_logs) > self.max_lines:
+            self.raw_logs = self.raw_logs[-self.max_lines :]
+            self.raw_logs_with_timestamps = self.raw_logs_with_timestamps[-self.max_lines :]
+            trimmed = True
+
+        if (
+            not trimmed
+            and not initial
+            and self._can_incremental_append()
+            and prev_len < len(self.raw_logs)
+            and not self.normalize_enabled
+        ):
+            self._append_new_log_lines(prev_len)
+            self._last_raw_len = len(self.raw_logs)
+            self.update_stats()
+            if self.is_following:
+                try:
+                    self.query_one("#log-content", RichLog).scroll_end()
+                except Exception:
+                    pass
+            return
+
+        self._last_raw_len = len(self.raw_logs)
         self.process_and_display_logs()
-    
+
+    def _can_incremental_append(self) -> bool:
+        return (
+            not self.filter_term
+            and not self.time_filter_from
+            and not self.time_filter_to
+            and not self.search_term
+        )
+
+    def _append_new_log_lines(self, start_index: int) -> None:
+        log_widget = self.query_one("#log-content", RichLog)
+        base_idx = len(self.processed_logs)
+        for i in range(start_index, len(self.raw_logs)):
+            pl = self.raw_logs[i]
+            if self.show_timestamps and i < len(self.raw_logs_with_timestamps):
+                ts_line = self.raw_logs_with_timestamps[i]
+                if ts_line and " " in ts_line:
+                    timestamp = ts_line.split(" ", 1)[0]
+                    disp = f"{timestamp} {pl}"
+                else:
+                    disp = pl
+            else:
+                disp = pl
+            self.processed_logs.append(disp)
+            log_widget.write(self.format_log_line(disp, base_idx))
+            base_idx += 1
+
     def process_and_display_logs(self) -> None:
         """Process logs with normalization and filters."""
         log_widget = self.query_one("#log-content", RichLog)
-        # If user is not at bottom, auto-disable follow to prevent jumps
         if self.is_following and not self._is_view_at_bottom():
             self.is_following = False
             try:
                 log_widget.auto_scroll = False
             except Exception:
                 pass
-        log_widget.clear()
-        
-        # Return early if no logs
         if not self.raw_logs:
-            log_widget.write(Text("No logs available yet...", style=self._semantic_color("muted_text", "dim")))
+            log_widget.clear()
+            self.processed_logs = []
+            self.matches = []
+            log_widget.write(
+                Text("No logs available yet...", style=self._semantic_color("muted_text", "dim"))
+            )
+            self.update_stats()
             return
-        
-        # Apply normalization if enabled
         if self.normalize_enabled:
-            self.processed_logs = self.normalize_logs(self.raw_logs)
-        else:
-            self.processed_logs = self.raw_logs
-        
-        # Add Docker timestamps if enabled (after normalization)
-        if self.show_timestamps and self.raw_logs_with_timestamps:
-            # Extract timestamps from the timestamped version and prepend to processed logs
-            processed_with_ts = []
-            for i, processed_line in enumerate(self.processed_logs):
-                if i < len(self.raw_logs_with_timestamps):
-                    # Extract timestamp from the Docker log line
-                    ts_line = self.raw_logs_with_timestamps[i]
-                    # Docker timestamp format: "2024-01-23T10:30:45.123456789Z <actual log>"
-                    if ts_line and ' ' in ts_line:
-                        timestamp = ts_line.split(' ', 1)[0]
-                        # Prepend timestamp to the processed line
-                        processed_with_ts.append(f"{timestamp} {processed_line}")
-                    else:
-                        processed_with_ts.append(processed_line)
+            self._worker_normalize_logs(list(self.raw_logs))
+            return
+        self._process_and_display_logs_inline()
+
+    def _merge_docker_timestamps_into_processed(self) -> None:
+        if not self.show_timestamps or not self.raw_logs_with_timestamps:
+            return
+        processed_with_ts = []
+        for i, processed_line in enumerate(self.processed_logs):
+            if i < len(self.raw_logs_with_timestamps):
+                ts_line = self.raw_logs_with_timestamps[i]
+                if ts_line and " " in ts_line:
+                    timestamp = ts_line.split(" ", 1)[0]
+                    processed_with_ts.append(f"{timestamp} {processed_line}")
                 else:
                     processed_with_ts.append(processed_line)
-            self.processed_logs = processed_with_ts
-        
-        # Apply time filter
+            else:
+                processed_with_ts.append(processed_line)
+        self.processed_logs = processed_with_ts
+
+    def _process_and_display_logs_inline(self) -> None:
+        self.processed_logs = list(self.raw_logs)
+        self._merge_docker_timestamps_into_processed()
         if self.time_filter_from or self.time_filter_to:
             self.processed_logs = self.filter_logs_by_time(self.processed_logs)
-        
-        # Apply text filter
         if self.filter_term:
             self.processed_logs = self.filter_logs(self.processed_logs, self.filter_term)
-        
-        # Apply search highlighting
+        self._write_all_log_lines()
+
+    def _apply_normalized_and_render(self, normalized_plain: List[str]) -> None:
+        self.processed_logs = list(normalized_plain)
+        self._merge_docker_timestamps_into_processed()
+        if self.time_filter_from or self.time_filter_to:
+            self.processed_logs = self.filter_logs_by_time(self.processed_logs)
+        if self.filter_term:
+            self.processed_logs = self.filter_logs(self.processed_logs, self.filter_term)
+        self._write_all_log_lines()
+
+    def _write_all_log_lines(self) -> None:
+        log_widget = self.query_one("#log-content", RichLog)
+        log_widget.clear()
+        if not self.processed_logs:
+            log_widget.write(
+                Text("No logs available yet...", style=self._semantic_color("muted_text", "dim"))
+            )
+            self.matches = []
+            self.update_stats()
+            return
         self.matches = []
         for i, line in enumerate(self.processed_logs):
-            display_line = self.format_log_line(line, i)
-            log_widget.write(display_line)
-        
-        # Update stats
+            log_widget.write(self.format_log_line(line, i))
         self.update_stats()
-        
-        # Scroll to bottom if following (and still at bottom)
         if self.is_following:
             try:
                 log_widget.scroll_end()
             except Exception:
                 pass
-    
+
+    @work(thread=True)
+    def _worker_normalize_logs(self, snap_plain: List[str]) -> None:
+        normalized = _normalize_logs_subprocess(snap_plain, self.normalize_script)
+        self.app.call_from_thread(self._apply_normalized_and_render, normalized)
+
     def normalize_logs(self, logs: List[str]) -> List[str]:
-        """Normalize log lines using the normalize script."""
-        if not logs:
-            return logs
-            
-        if not os.path.exists(self.normalize_script):
-            # Script not found, return original logs
-            return logs
-        
-        # Make sure the script is executable
-        if not os.access(self.normalize_script, os.X_OK):
-            try:
-                os.chmod(self.normalize_script, 0o755)
-            except OSError:
-                return logs
-        
-        try:
-            # Join log lines for input
-            log_text = '\n'.join(logs)
-            
-            # Run normalization script with the current Python interpreter
-            process = subprocess.Popen(
-                [sys.executable, self.normalize_script],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            # Send logs and get normalized output
-            stdout, stderr = process.communicate(input=log_text, timeout=3)
-            
-            # Check for errors
-            if process.returncode != 0:
-                # Return original logs on error
-                return logs
-            
-            # Split output into lines and return
-            if stdout:
-                normalized = stdout.splitlines()
-                # Return normalized logs if we got them
-                if normalized:
-                    return normalized
-            
-            # Fall back to original logs
-            return logs
-                
-        except (subprocess.TimeoutExpired, Exception):
-            # Return original logs on any error
-            return logs
+        """Normalize log lines using the normalize script (blocking; prefer worker path)."""
+        return _normalize_logs_subprocess(logs, self.normalize_script)
     
     def filter_logs(self, logs: List[str], filter_expr: str) -> List[str]:
         """Filter logs based on expression."""
@@ -1228,6 +1266,7 @@ class LogViewScreen(Screen):
         self.raw_logs = []
         self.raw_logs_with_timestamps = []
         self.processed_logs = []
+        self._last_raw_len = 0
         log_widget = self.query_one("#log-content", RichLog)
         log_widget.clear()
         self.update_stats()

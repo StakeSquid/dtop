@@ -47,6 +47,32 @@ def format_datetime(dt_str):
     except (ValueError, AttributeError):
         return dt_str
 
+
+def container_image_label(container) -> str:
+    """Image reference string from container.attrs only.
+
+    Avoids docker-py's ``container.image`` property, which lazily calls the API
+    (``images.get``) and can stall the UI when used in tight loops.
+    """
+    try:
+        attrs = getattr(container, "attrs", None)
+        if not isinstance(attrs, dict):
+            return "<none>"
+        img = attrs.get("Image")
+        if img:
+            return str(img)
+        cfg = attrs.get("Config")
+        if isinstance(cfg, dict):
+            cimg = cfg.get("Image")
+            if cimg:
+                return str(cimg)
+        iid = attrs.get("ImageID")
+        if iid:
+            return str(iid)
+    except Exception:
+        pass
+    return "<none>"
+
 def format_column(text, width, align='left'):
     """Format text to fit in column with padding"""
     text_str = str(text)

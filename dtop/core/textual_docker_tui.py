@@ -12,9 +12,11 @@ import os
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
-from typing import Optional, List, Dict, Any, Tuple
+from functools import partial
+from typing import Optional, List, Dict, Any, Tuple, Callable
 from dataclasses import dataclass
 
 from textual import on, work
@@ -31,7 +33,7 @@ from textual.coordinate import Coordinate
 from textual.theme import Theme
 from rich.text import Text
 
-from ..utils.utils import format_bytes, format_datetime, format_timedelta
+from ..utils.utils import format_bytes, format_datetime, format_timedelta, container_image_label
 from ..utils.config import (
     load_config,
     save_config,
@@ -39,6 +41,7 @@ from ..utils.config import (
     save_theme,
     load_custom_theme,
     save_custom_theme,
+    load_performance_settings,
     CUSTOM_THEME_NAME,
     DEFAULT_THEME,
     DEFAULT_SEMANTIC_COLORS,
@@ -46,6 +49,132 @@ from ..utils.config import (
 from ..views.textual_log_view import LogViewScreen
 from ..views.textual_inspect_view import InspectViewScreen
 from .textual_stats import StatsManager
+
+
+def _prepare_docker_exec_command(container: Any) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Pick shell and build `docker exec` argv; runs blocking Docker API calls."""
+    try:
+        if container.status != "running":
+            return None, "not_running"
+        is_windows_container = False
+        try:
+            test_result = container.exec_run("test -d C:\\Windows")
+            if hasattr(test_result, "exit_code"):
+                is_windows_container = test_result.exit_code == 0
+            elif isinstance(test_result, tuple):
+                is_windows_container = test_result[0] == 0
+        except Exception:
+            pass
+        if is_windows_container:
+            shells_to_try = ["powershell.exe", "cmd.exe"]
+        else:
+            shells_to_try = ["/bin/bash", "/bin/sh", "/bin/ash", "/bin/zsh"]
+        available_shell = None
+        for shell in shells_to_try:
+            try:
+                if is_windows_container:
+                    test_cmd = (
+                        f'{shell} /c "exit 0"' if shell == "cmd.exe" else f'{shell} -Command "exit 0"'
+                    )
+                else:
+                    test_cmd = f"test -e {shell}"
+                exec_result = container.exec_run(test_cmd)
+                if hasattr(exec_result, "exit_code"):
+                    exit_code = exec_result.exit_code
+                else:
+                    exit_code = exec_result[0] if isinstance(exec_result, tuple) else 1
+                if exit_code == 0:
+                    available_shell = shell
+                    break
+            except Exception:
+                continue
+        if not available_shell:
+            return None, "no_shell"
+        container_info = container.attrs
+        has_tty = container_info.get("Config", {}).get("Tty", False)
+        docker_cmd = ["docker", "exec"]
+        if has_tty or not is_windows_container:
+            docker_cmd.extend(["-it"])
+        else:
+            docker_cmd.append("-i")
+        user = container_info.get("Config", {}).get("User", None)
+        if user:
+            docker_cmd.extend(["-u", user])
+        working_dir = container_info.get("Config", {}).get("WorkingDir", None)
+        if working_dir:
+            docker_cmd.extend(["-w", working_dir])
+        docker_cmd.extend([container.id, available_shell])
+        return docker_cmd, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _simple_recreate_sync(docker_client: Any, container: Any) -> Tuple[Optional[Exception], Optional[str]]:
+    """Stop, remove, and re-create a container (blocking; run via `_docker_run`)."""
+    try:
+        container_info = container.attrs
+        config = container_info.get("Config", {})
+        host_config = container_info.get("HostConfig", {})
+        image_name = container_image_label(container)
+        if image_name == "<none>":
+            return ValueError("Could not resolve container image from attrs"), None
+        container_name = container.name
+        env_vars = config.get("Env", [])
+        binds = host_config.get("Binds", [])
+        ports = {}
+        port_bindings = host_config.get("PortBindings", {})
+        for container_port, host_ports in port_bindings.items():
+            if host_ports:
+                for hp in host_ports:
+                    if hp.get("HostPort"):
+                        ports[container_port] = hp["HostPort"]
+        network_mode = host_config.get("NetworkMode", "default")
+        restart_policy = host_config.get("RestartPolicy", {})
+        restart = None
+        if restart_policy.get("Name"):
+            restart = restart_policy["Name"]
+            if restart == "on-failure" and restart_policy.get("MaximumRetryCount"):
+                restart = f"on-failure:{restart_policy['MaximumRetryCount']}"
+        try:
+            container.stop(timeout=10)
+        except Exception:
+            pass
+        container.remove(force=True)
+        run_kwargs = {
+            "image": image_name,
+            "name": container_name,
+            "detach": True,
+            "environment": env_vars,
+        }
+        if binds:
+            run_kwargs["volumes"] = binds
+        if ports:
+            run_kwargs["ports"] = ports
+        if network_mode and network_mode != "default":
+            run_kwargs["network_mode"] = network_mode
+        if restart:
+            run_kwargs["restart_policy"] = {"Name": restart}
+        cmd = config.get("Cmd")
+        if cmd:
+            run_kwargs["command"] = cmd
+        entrypoint = config.get("Entrypoint")
+        if entrypoint:
+            run_kwargs["entrypoint"] = entrypoint
+        working_dir = config.get("WorkingDir")
+        if working_dir:
+            run_kwargs["working_dir"] = working_dir
+        user = config.get("User")
+        if user:
+            run_kwargs["user"] = user
+        docker_client.containers.run(**run_kwargs)
+        return None, container_name
+    except Exception as e:
+        try:
+            old_container = docker_client.containers.get(container.id)
+            old_container.remove(force=True)
+        except Exception:
+            pass
+        return e, None
 
 
 @dataclass
@@ -433,7 +562,10 @@ class ContainerActionModal(ModalScreen):
             # Scrollable middle content - FLATTENED structure
             with ScrollableContainer(id="action-list"):
                 # Information section
-                yield Static(f"Image: {self.container.image.tags[0] if self.container.image.tags else '<none>'}", classes="info-text")
+                yield Static(
+                    f"Image: {container_image_label(self.container)}",
+                    classes="info-text",
+                )
                 yield Static(f"Status: {self.container.status}", classes="info-text")
                 yield Static(f"ID: {self.container.short_id}", classes="info-text")
                 
@@ -656,6 +788,8 @@ class DockerTUIApp(App):
         Binding("t", "theme_settings", "Theme Edit"),
         Binding("c", "column_settings", "Columns"),
     ]
+
+    _STAT_COLUMN_NAMES = frozenset({"CPU%", "MEM%", "NET I/O", "DISK I/O"})
     
     # Reactive properties
     filter_text = reactive("")
@@ -675,8 +809,11 @@ class DockerTUIApp(App):
         self.filtered_containers = []
         self.container_map = {}
         self._search_matches: List[str] = []  # container IDs matching search
+        self._performance = load_performance_settings()
         self.stats_manager = StatsManager()
         self.stats_cache = {}
+        self._stats_table_debounce_task: Optional[asyncio.Task] = None
+        self._stats_display_cache: Dict[Tuple[str, str], str] = {}
         self.columns = load_config()
         self._semantic_colors = DEFAULT_SEMANTIC_COLORS.copy()
         self._register_custom_theme_if_configured()
@@ -691,6 +828,21 @@ class DockerTUIApp(App):
         self.sort_reverse = False
         self.selected_container_id = None
         self.last_refresh = 0
+        self._docker_sdk_lock = threading.Lock()
+
+    async def _docker_run(self, func: Callable, *args, **kwargs) -> Any:
+        """Run blocking docker-py calls off the event loop (serialized for thread safety)."""
+        loop = asyncio.get_running_loop()
+
+        def _call() -> Any:
+            with self._docker_sdk_lock:
+                if kwargs:
+                    return partial(func, *args, **kwargs)()
+                if args:
+                    return func(*args)
+                return func()
+
+        return await loop.run_in_executor(None, _call)
 
     def _register_custom_theme_if_configured(self) -> None:
         """Register a user-defined theme from config when present."""
@@ -976,7 +1128,7 @@ class DockerTUIApp(App):
     async def connect_docker(self) -> None:
         """Connect to Docker daemon."""
         try:
-            self.docker_client = docker.from_env()
+            self.docker_client = await self._docker_run(docker.from_env)
             status = self.query_one("#connection-status", Label)
             status.update("✓ Connected")
             status.styles.color = self._semantic_color("connection_ok", "green")
@@ -1020,9 +1172,10 @@ class DockerTUIApp(App):
         self.last_refresh = current_time
         
         try:
-            # Always get all containers
-            self.containers = self.docker_client.containers.list(all=True)
-            
+            # Always get all containers (blocking Docker SDK → thread pool)
+            client = self.docker_client
+            self.containers = await self._docker_run(client.containers.list, all=True)
+
             # Build container map for quick lookup
             self.container_map = {c.id: c for c in self.containers}
             
@@ -1059,10 +1212,10 @@ class DockerTUIApp(App):
             filter_lower = self.filter_text.lower()
             filtered = [
                 c for c in filtered
-                if filter_lower in c.name.lower() or
-                   (c.image.tags and filter_lower in c.image.tags[0].lower()) or
-                   filter_lower in c.status.lower() or
-                   filter_lower in c.short_id.lower()
+                if filter_lower in c.name.lower()
+                or filter_lower in container_image_label(c).lower()
+                or filter_lower in c.status.lower()
+                or filter_lower in c.short_id.lower()
             ]
         
         self.filtered_containers = filtered
@@ -1086,7 +1239,7 @@ class DockerTUIApp(App):
         if col_name == 'NAME':
             return container.name.lower()
         elif col_name == 'IMAGE':
-            return container.image.tags[0].lower() if container.image.tags else ''
+            return container_image_label(container).lower()
         elif col_name == 'STATUS':
             return container.status.lower()
         elif col_name == 'CPU%':
@@ -1111,6 +1264,72 @@ class DockerTUIApp(App):
             return 0
         else:
             return ""
+
+    def _format_stat_column_cell(self, col_name: str, stats: Dict[str, Any]) -> str:
+        """Formatted string for a single stats column (CPU/MEM/NET/DISK)."""
+        if col_name == "CPU%":
+            return f"{stats.get('cpu', 0):.1f}%"
+        if col_name == "MEM%":
+            return f"{stats.get('mem', 0):.1f}%"
+        if col_name == "NET I/O":
+            net_in = stats.get("net_in_rate", 0)
+            net_out = stats.get("net_out_rate", 0)
+            return f"↓{format_bytes(net_in, '/s')} ↑{format_bytes(net_out, '/s')}"
+        if col_name == "DISK I/O":
+            disk_read = stats.get("block_read_rate", 0)
+            disk_write = stats.get("block_write_rate", 0)
+            return f"R:{format_bytes(disk_read, '/s')} W:{format_bytes(disk_write, '/s')}"
+        return ""
+
+    async def _update_stat_columns_only(self) -> None:
+        """Refresh only CPU/MEM/NET/DISK cells when row order/keys are unchanged."""
+        try:
+            table = self.query_one("#container-table", DataTable)
+        except Exception:
+            return
+
+        stat_name_to_idx: Dict[str, int] = {}
+        for i, col in enumerate(self.columns):
+            n = col.get("name")
+            if n in self._STAT_COLUMN_NAMES:
+                stat_name_to_idx[str(n)] = i
+        if not stat_name_to_idx:
+            return
+
+        new_ids = [c.id for c in self.filtered_containers]
+        row_count = getattr(table, "row_count", 0)
+        existing_ids: List[Optional[str]] = []
+        for idx in range(row_count):
+            try:
+                cell_key = table.coordinate_to_cell_key(Coordinate(idx, 0))
+                existing_ids.append(cell_key.row_key.value)
+            except Exception:
+                existing_ids.append(None)
+
+        if existing_ids != new_ids or not new_ids:
+            await self.update_table()
+            return
+
+        col_keys = [f"col_{i}" for i in range(len(self.columns))]
+        for container in self.filtered_containers:
+            stats = self.stats_manager.get_stats(container.id) or {}
+            cid = container.id
+            for col_name in stat_name_to_idx:
+                val = self._format_stat_column_cell(col_name, stats)
+                cache_key = (cid, col_name)
+                if self._stats_display_cache.get(cache_key) == val:
+                    continue
+                try:
+                    table.update_cell(
+                        cid,
+                        col_keys[stat_name_to_idx[col_name]],
+                        val,
+                        update_width=False,
+                    )
+                    self._stats_display_cache[cache_key] = val
+                except Exception:
+                    await self.update_table()
+                    return
     
     async def update_table(self) -> None:
         """Update the data table with container info.
@@ -1118,6 +1337,7 @@ class DockerTUIApp(App):
         Uses in-place cell updates when the row set hasn't changed to avoid
         resetting the DataTable's internal hover/cursor state.
         """
+        self._stats_display_cache.clear()
         table = self.query_one("#container-table", DataTable)
 
         new_ids = [c.id for c in self.filtered_containers]
@@ -1227,7 +1447,7 @@ class DockerTUIApp(App):
             if col_name == 'NAME':
                 row_data.append(self._highlight_text(container.name))
             elif col_name == 'IMAGE':
-                image = container.image.tags[0] if container.image.tags else '<none>'
+                image = container_image_label(container)
                 row_data.append(self._highlight_text(image))
             elif col_name == 'STATUS':
                 status = container.status
@@ -1301,14 +1521,27 @@ class DockerTUIApp(App):
     
     async def start_stats_collection(self) -> None:
         """Start the stats manager."""
-        await self.stats_manager.start(self.on_stats_updated)
-    
+        await self.stats_manager.start(
+            self.on_stats_updated,
+            low_connection_mode=self._performance["low_connection_mode"],
+            max_concurrent_stats_streams=self._performance["max_concurrent_stats_streams"],
+        )
+
     async def on_stats_updated(self, stats: Dict[str, Any]) -> None:
-        """Handle stats update from stats manager."""
-        # Update cache with new stats
+        """Handle stats update from stats manager (debounced table refresh)."""
         self.stats_cache = self.stats_manager.get_all_stats()
-        # Request UI update
-        await self.update_table()
+        if self._stats_table_debounce_task and not self._stats_table_debounce_task.done():
+            self._stats_table_debounce_task.cancel()
+        self._stats_table_debounce_task = asyncio.create_task(
+            self._debounced_stats_table_update()
+        )
+
+    async def _debounced_stats_table_update(self) -> None:
+        try:
+            await asyncio.sleep(0.2)
+            await self._update_stat_columns_only()
+        except asyncio.CancelledError:
+            raise
     
     def get_selected_container(self) -> Optional[Any]:
         """Get currently selected container."""
@@ -1366,7 +1599,9 @@ class DockerTUIApp(App):
         s = self.search_text.lower()
         for c in self.filtered_containers:
             try:
-                image = (c.image.tags[0] if c.image.tags else "")
+                image = container_image_label(c)
+                if image == "<none>":
+                    image = ""
             except Exception:
                 image = ""
             if (
@@ -1557,27 +1792,27 @@ class DockerTUIApp(App):
             elif action == "inspect":
                 self.push_screen(InspectViewScreen(container))
             elif action == "stop":
-                container.stop()
+                await self._docker_run(container.stop)
                 self.notify(f"Stopped {container.name}", severity="information")
                 await self.refresh_containers()
             elif action == "start":
-                container.start()
+                await self._docker_run(container.start)
                 self.notify(f"Started {container.name}", severity="information")
                 await self.refresh_containers()
             elif action == "restart":
-                container.restart()
+                await self._docker_run(container.restart)
                 self.notify(f"Restarted {container.name}", severity="information")
                 await self.refresh_containers()
             elif action == "pause":
-                container.pause()
+                await self._docker_run(container.pause)
                 self.notify(f"Paused {container.name}", severity="information")
                 await self.refresh_containers()
             elif action == "unpause":
-                container.unpause()
+                await self._docker_run(container.unpause)
                 self.notify(f"Unpaused {container.name}", severity="information")
                 await self.refresh_containers()
             elif action == "remove":
-                container.remove(force=True)
+                await self._docker_run(container.remove, force=True)
                 self.notify(f"Removed {container.name}", severity="warning")
                 await self.refresh_containers()
             elif action == "exec":
@@ -1767,281 +2002,101 @@ class DockerTUIApp(App):
     async def execute_shell_into_container(self, container) -> None:
         """Execute an interactive shell session into the container."""
         try:
-            # Check if container is running
-            if container.status != "running":
+            docker_cmd, err = await self._docker_run(_prepare_docker_exec_command, container)
+            if err == "not_running":
                 self.notify(f"Container {container.name} is not running", severity="warning")
                 return
-            
-            # Check if container is Windows or Linux based
-            # Try to detect OS by checking for typical Windows paths
-            is_windows_container = False
-            try:
-                test_result = container.exec_run("test -d C:\\Windows")
-                if hasattr(test_result, 'exit_code'):
-                    is_windows_container = test_result.exit_code == 0
-                elif isinstance(test_result, tuple):
-                    is_windows_container = test_result[0] == 0
-            except Exception:
-                pass
-            
-            # Determine available shells in order of preference
-            if is_windows_container:
-                shells_to_try = ["powershell.exe", "cmd.exe"]
-            else:
-                shells_to_try = ["/bin/bash", "/bin/sh", "/bin/ash", "/bin/zsh"]
-            available_shell = None
-            
-            # Test which shell is available
-            for shell in shells_to_try:
-                try:
-                    # Test if shell exists in container
-                    if is_windows_container:
-                        # For Windows, try to run the shell with a simple command
-                        test_cmd = f'{shell} /c "exit 0"' if shell == "cmd.exe" else f'{shell} -Command "exit 0"'
-                    else:
-                        # For Linux, test if shell exists
-                        test_cmd = f"test -e {shell}"
-                    
-                    exec_result = container.exec_run(test_cmd)
-                    # Handle both old and new docker-py API versions
-                    if hasattr(exec_result, 'exit_code'):
-                        exit_code = exec_result.exit_code
-                    else:
-                        # Older versions might return tuple (exit_code, output)
-                        exit_code = exec_result[0] if isinstance(exec_result, tuple) else 1
-                    
-                    if exit_code == 0:
-                        available_shell = shell
-                        break
-                except Exception:
-                    continue
-            
-            if not available_shell:
+            if err == "no_shell":
                 self.notify(f"No shell found in container {container.name}", severity="error")
                 return
-            
-            # Check if the container has TTY capability
-            container_info = container.attrs
-            has_tty = container_info.get('Config', {}).get('Tty', False)
-            
-            # Build the docker exec command
-            docker_cmd = ["docker", "exec"]
-            
-            # Add interactive and TTY flags if supported
-            if has_tty or not is_windows_container:
-                docker_cmd.extend(["-it"])
-            else:
-                # For non-TTY containers, still try interactive mode
-                docker_cmd.append("-i")
-            
-            # Set user if specified in container config
-            user = container_info.get('Config', {}).get('User', None)
-            if user:
-                docker_cmd.extend(["-u", user])
-            
-            # Set working directory to a sensible default if available
-            working_dir = container_info.get('Config', {}).get('WorkingDir', None)
-            if working_dir:
-                docker_cmd.extend(["-w", working_dir])
-            
-            # Add container ID and shell
-            docker_cmd.extend([container.id, available_shell])
-            
-            # Show notification about entering shell
+            if err or not docker_cmd:
+                self.notify(f"Failed to prepare shell: {err or 'unknown'}", severity="error")
+                return
+
+            shell_name = docker_cmd[-1]
             self.notify(f"Entering shell in {container.name}...", timeout=1)
-            
-            # Save terminal state and prepare for suspension
+
             def run_docker_exec():
                 """Run docker exec in a clean terminal environment."""
-                # Save current terminal settings
                 old_tty = None
                 try:
                     old_tty = termios.tcgetattr(sys.stdin)
                 except Exception:
                     pass
-                
-                # Reset terminal to a clean state
-                sys.stdout.write('\033c')  # Reset terminal
-                sys.stdout.write('\033[?1000l')  # Disable mouse reporting
-                sys.stdout.write('\033[?1002l')  # Disable mouse motion tracking  
-                sys.stdout.write('\033[?1003l')  # Disable any mouse mode
-                sys.stdout.write('\033[?1006l')  # Disable SGR mouse mode
-                sys.stdout.write('\033[?1015l')  # Disable urxvt mouse mode
-                sys.stdout.write('\033[?25h')   # Show cursor
-                sys.stdout.write('\033[0m')  # Reset all attributes
-                sys.stdout.write('\033[2J\033[H')  # Clear screen and move cursor to top
+
+                sys.stdout.write("\033c")
+                sys.stdout.write("\033[?1000l")
+                sys.stdout.write("\033[?1002l")
+                sys.stdout.write("\033[?1003l")
+                sys.stdout.write("\033[?1006l")
+                sys.stdout.write("\033[?1015l")
+                sys.stdout.write("\033[?25h")
+                sys.stdout.write("\033[0m")
+                sys.stdout.write("\033[2J\033[H")
                 sys.stdout.flush()
-                
-                # Small delay to ensure terminal is ready
+
                 time.sleep(0.1)
-                
+
                 try:
-                    # Execute the docker command in the terminal
                     result = subprocess.call(docker_cmd)
-                    
-                    # Handle different exit codes
                     if result == 0:
-                        # Success - do nothing, just resume
                         pass
                     elif result == 125:
-                        # Docker daemon error
                         print("\nError: Docker daemon error occurred")
                     elif result == 126:
-                        # Container command not executable
-                        print(f"\nError: Shell {available_shell} is not executable in container")
+                        print(f"\nError: Shell {shell_name} is not executable in container")
                     elif result == 127:
-                        # Container command not found
-                        print(f"\nError: Shell {available_shell} not found in container")
+                        print(f"\nError: Shell {shell_name} not found in container")
                     else:
-                        # Other error
                         print(f"\nShell exited with code {result}")
-                    
-                    # Wait for user to acknowledge if there was an error
+
                     if result != 0:
                         print("\nPress Enter to return to Docker TUI...")
                         input()
-                        
+
                 except FileNotFoundError:
                     print("\nError: Docker command not found. Please ensure Docker is installed.")
                     print("Press Enter to return to Docker TUI...")
                     input()
                 except KeyboardInterrupt:
-                    # User pressed Ctrl+C - this is normal
                     print("\n\nReturning to Docker TUI...")
                 except Exception as e:
                     print(f"\nError executing shell: {e}")
                     print("Press Enter to return to Docker TUI...")
                     input()
                 finally:
-                    # Restore terminal settings
                     if old_tty:
                         try:
                             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
                         except Exception:
                             pass
-                    
-                    # Clear screen and reset terminal state before returning
-                    sys.stdout.write('\033[2J\033[H')  # Clear screen
-                    sys.stdout.write('\033[0m')  # Reset attributes
+                    sys.stdout.write("\033[2J\033[H")
+                    sys.stdout.write("\033[0m")
                     sys.stdout.flush()
-            
-            # Use Textual's suspend context manager with the callback
+
             with self.suspend():
                 run_docker_exec()
-            
-            # After resuming, the app will automatically restore mouse mode and redraw
-            
+
         except Exception as e:
             self.notify(f"Failed to execute shell: {e}", severity="error")
     
     async def execute_simple_recreate(self, container) -> None:
         """Recreate a container without docker-compose (simple docker run)."""
         try:
-            # Get container configuration
-            container_info = container.attrs
-            config = container_info.get('Config', {})
-            host_config = container_info.get('HostConfig', {})
-            
-            # Get image
-            image = container.image
-            image_name = image.tags[0] if image.tags else image.id
-            
-            # Store container name
-            container_name = container.name
-            
-            # Get important configurations
-            env_vars = config.get('Env', [])
-            volumes = []
-            binds = host_config.get('Binds', [])
-            ports = {}
-            
-            # Parse port bindings
-            port_bindings = host_config.get('PortBindings', {})
-            for container_port, host_ports in port_bindings.items():
-                if host_ports:
-                    for hp in host_ports:
-                        if hp.get('HostPort'):
-                            ports[container_port] = hp['HostPort']
-            
-            # Get network mode
-            network_mode = host_config.get('NetworkMode', 'default')
-            
-            # Get restart policy  
-            restart_policy = host_config.get('RestartPolicy', {})
-            restart = None
-            if restart_policy.get('Name'):
-                restart = restart_policy['Name']
-                if restart == 'on-failure' and restart_policy.get('MaximumRetryCount'):
-                    restart = f"on-failure:{restart_policy['MaximumRetryCount']}"
-            
-            # Stop and remove the container
-            self.notify(f"Stopping {container_name}...", timeout=1)
-            try:
-                container.stop(timeout=10)
-            except Exception:
-                pass  # Container might already be stopped
-            
-            self.notify(f"Removing {container_name}...", timeout=1)
-            container.remove(force=True)
-            
-            # Create new container with same config
-            self.notify(f"Creating {container_name}...", timeout=1)
-            
-            # Build docker run arguments
-            run_kwargs = {
-                'image': image_name,
-                'name': container_name,
-                'detach': True,
-                'environment': env_vars,
-            }
-            
-            # Add optional parameters
-            if binds:
-                run_kwargs['volumes'] = binds
-            if ports:
-                run_kwargs['ports'] = ports
-            if network_mode and network_mode != 'default':
-                run_kwargs['network_mode'] = network_mode
-            if restart:
-                run_kwargs['restart_policy'] = {'Name': restart}
-            
-            # Add command if present
-            cmd = config.get('Cmd')
-            if cmd:
-                run_kwargs['command'] = cmd
-            
-            # Add entrypoint if present
-            entrypoint = config.get('Entrypoint')
-            if entrypoint:
-                run_kwargs['entrypoint'] = entrypoint
-            
-            # Add working directory
-            working_dir = config.get('WorkingDir')
-            if working_dir:
-                run_kwargs['working_dir'] = working_dir
-            
-            # Add user
-            user = config.get('User')
-            if user:
-                run_kwargs['user'] = user
-            
-            # Create and start new container
-            new_container = self.docker_client.containers.run(**run_kwargs)
-            
-            self.notify(f"Successfully recreated {container_name}", severity="information")
-            
-            # Refresh the container list
+            self.notify(f"Recreating {container.name}...", timeout=2)
+            err, container_name = await self._docker_run(
+                _simple_recreate_sync, self.docker_client, container
+            )
+            if err:
+                self.notify(f"Failed to recreate container: {err}", severity="error")
+                return
+            self.notify(
+                f"Successfully recreated {container_name}",
+                severity="information",
+            )
             await self.refresh_containers()
-            
         except Exception as e:
             self.notify(f"Failed to recreate container: {e}", severity="error")
-            # Try to clean up if something went wrong
-            try:
-                # Check if old container still exists and remove it
-                old_container = self.docker_client.containers.get(container.id)
-                old_container.remove(force=True)
-            except Exception:
-                pass
     
     async def execute_docker_compose_recreate(self, container, compose_path: str, service_name: str, selected_file: Optional[str] = None) -> None:
         """Execute docker-compose to recreate a container."""
@@ -2233,6 +2288,8 @@ class DockerTUIApp(App):
         """Cleanup when app closes."""
         if self.refresh_timer:
             self.refresh_timer.stop()
+        if self._stats_table_debounce_task and not self._stats_table_debounce_task.done():
+            self._stats_table_debounce_task.cancel()
         await self.stats_manager.stop()
 
 
@@ -2359,7 +2416,9 @@ class RecreateContainerModal(ModalScreen[Optional[Dict[str, Any]]]):
             
             # Info section
             with Container(id="info-section"):
-                image_name = self.container.image.tags[0] if self.container.image.tags else self.container.image.short_id
+                image_name = container_image_label(self.container)
+                if image_name == "<none>":
+                    image_name = getattr(self.container, "short_id", "?")
                 yield Label(f"Image: {image_name}", classes="info-label")
                 yield Label(f"Status: {self.container.status}", classes="info-label")
                 

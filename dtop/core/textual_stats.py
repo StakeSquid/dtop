@@ -73,12 +73,17 @@ class StreamInfo:
     last_data_time: float = field(default_factory=time.time)
     reconnect_count: int = 0
     is_healthy: bool = True
+    is_polling: bool = False
 
 
 class ReliableStatsCollector:
     """Reliable async stats collector with automatic recovery."""
     
-    def __init__(self):
+    def __init__(
+        self,
+        low_connection_mode: bool = False,
+        max_concurrent_stats_streams: Optional[int] = None,
+    ):
         self.session: Optional[aiohttp.ClientSession] = None
         self.connector: Optional[aiohttp.UnixConnector] = None
         self.stats_cache: Dict[str, ContainerStats] = {}
@@ -88,18 +93,22 @@ class ReliableStatsCollector:
         self.last_health_check = time.time()
         self.active_streams: Dict[str, StreamInfo] = {}
         self.monitored_containers: Set[str] = set()
-        self.fallback_mode = False
+        self.low_connection_mode = low_connection_mode
+        self.max_concurrent_stats_streams = max_concurrent_stats_streams
+        self.fallback_mode = bool(low_connection_mode)
         self.health_check_task: Optional[asyncio.Task] = None
         
     @asynccontextmanager
     async def connect(self):
         """Context manager for aiohttp session."""
         try:
+            pool = 15 if self.low_connection_mode else MAX_CONNECTION_POOL
+            per_host = 10 if self.low_connection_mode else MAX_CONNECTION_POOL
             # Create Unix socket connector
             self.connector = aiohttp.UnixConnector(
                 path=DOCKER_SOCKET_PATH,
-                limit=MAX_CONNECTION_POOL,
-                limit_per_host=MAX_CONNECTION_POOL,
+                limit=pool,
+                limit_per_host=per_host,
                 force_close=False,
                 keepalive_timeout=30
             )
@@ -202,17 +211,30 @@ class ReliableStatsCollector:
         for cid in to_remove:
             del self.active_streams[cid]
     
+    def _streaming_task_count(self) -> int:
+        return sum(1 for s in self.active_streams.values() if not s.is_polling)
+
+    def _should_poll_container(self, container_id: str) -> bool:
+        if self.fallback_mode:
+            return True
+        cap = self.max_concurrent_stats_streams
+        if not cap:
+            return False
+        if self._streaming_task_count() >= cap:
+            return True
+        return False
+
     async def _start_stream(self, container_id: str):
         """Start a stats stream for a container."""
         stream_info = StreamInfo(container_id=container_id)
-        
-        if self.fallback_mode:
-            # Use polling in fallback mode
+        use_poll = self._should_poll_container(container_id)
+        stream_info.is_polling = use_poll
+
+        if use_poll:
             stream_info.task = asyncio.create_task(
                 self._poll_container_stats(container_id)
             )
         else:
-            # Use streaming normally
             stream_info.task = asyncio.create_task(
                 self._stream_container_stats(container_id)
             )
@@ -281,9 +303,6 @@ class ReliableStatsCollector:
                             stream_info.last_data_time = time.time()
                             stream_info.is_healthy = True
                             stream_info.reconnect_count = 0  # Reset on success
-                        
-                        # Small delay between reads
-                        await asyncio.sleep(0.1)
                         
                     except json.JSONDecodeError:
                         continue
@@ -581,13 +600,21 @@ class StatsManager:
         self.container_ids: List[str] = []
         self.update_callback: Optional[callable] = None
         
-    async def start(self, update_callback: callable = None):
+    async def start(
+        self,
+        update_callback: callable = None,
+        low_connection_mode: bool = False,
+        max_concurrent_stats_streams: Optional[int] = None,
+    ):
         """Start stats collection."""
         if self.running:
             return
         
         self.update_callback = update_callback
-        self.collector = ReliableStatsCollector()
+        self.collector = ReliableStatsCollector(
+            low_connection_mode=low_connection_mode,
+            max_concurrent_stats_streams=max_concurrent_stats_streams,
+        )
         self.running = True
         
         # Start collection task

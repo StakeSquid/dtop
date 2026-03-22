@@ -260,6 +260,39 @@ def load_custom_theme() -> Optional[Dict[str, Any]]:
         return None
 
 
+def load_performance_settings() -> Dict[str, Any]:
+    """Optional tuning for high-latency Docker (e.g. WSL2 + Docker Desktop).
+
+    Reads ~/.docker_tui.json key ``performance``:
+    - low_connection_mode (bool): use polling-only stats and smaller aiohttp pools.
+    - max_concurrent_stats_streams (int|null): cap long-lived stats streams; excess
+      containers use one-shot polling. Ignored when low_connection_mode is true.
+    """
+    try:
+        cfg = _read_existing_config()
+        perf = cfg.get("performance")
+        if not isinstance(perf, dict):
+            perf = {}
+        low = bool(perf.get("low_connection_mode", False))
+        raw_max = perf.get("max_concurrent_stats_streams")
+        max_streams: Optional[int]
+        if raw_max is None or raw_max == "":
+            max_streams = None
+        else:
+            try:
+                max_streams = int(raw_max)
+                if max_streams < 1:
+                    max_streams = None
+            except (TypeError, ValueError):
+                max_streams = None
+        return {
+            "low_connection_mode": low,
+            "max_concurrent_stats_streams": None if low else max_streams,
+        }
+    except Exception:
+        return {"low_connection_mode": False, "max_concurrent_stats_streams": None}
+
+
 def save_custom_theme(custom_theme: Dict[str, Any], activate: bool = False) -> None:
     """Persist custom theme payload; optionally activate it as the current theme."""
     try:
