@@ -12,6 +12,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 NORMALIZE_SCRIPT = REPO_ROOT / "dtop" / "utils" / "normalize_logs.py"
 
 
+def test_split_docker_log_timestamp_strips_z_space_without_truncating_message():
+    """Docker prefix is '...Z '; message must start immediately after the space."""
+    ts, msg = tlv._split_docker_log_timestamp(
+        '2025-03-26T12:06:31.000Z {"severity":"INFO"}'
+    )
+    assert ts == "2025-03-26T12:06:31.000Z"
+    assert msg == '{"severity":"INFO"}'
+    assert msg.startswith("{")
+
+
 def _fake_screen_for_worker():
     applied: list = []
 

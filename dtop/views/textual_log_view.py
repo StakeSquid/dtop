@@ -33,7 +33,7 @@ def _split_docker_log_timestamp(line: str) -> Tuple[str, str]:
         return "", ""
     if "Z " in line:
         z = line.index("Z ")
-        return line[: z + 1], line[z + 3 :]
+        return line[: z + 1], line[z + 2 :]
     if " " in line and line[0].isdigit():
         prefix, rest = line.split(" ", 1)
         if "T" in prefix and len(prefix) >= 10:
