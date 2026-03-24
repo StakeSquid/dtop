@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dtop"
-version = "2.3.4"
+version = "2.3.5"
 description = "A high-performance terminal UI for Docker container management"
 readme = "README.md"
 license = "MIT"
