@@ -1170,7 +1170,25 @@ class DockerTUIApp(App):
             # Simple check: if click is below the header area (y > 4 since header height is 4)
             if event.y > 4:
                 self.show_header = False
-    
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        """Move DataTable cursor up on mouse scroll (only on main screen)."""
+        try:
+            table = self.screen.query_one("#container-table", DataTable)
+        except Exception:
+            return
+        table.action_cursor_up()
+        event.stop()
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        """Move DataTable cursor down on mouse scroll (only on main screen)."""
+        try:
+            table = self.screen.query_one("#container-table", DataTable)
+        except Exception:
+            return
+        table.action_cursor_down()
+        event.stop()
+
     async def connect_docker(self) -> None:
         """Connect to Docker daemon."""
         try:
