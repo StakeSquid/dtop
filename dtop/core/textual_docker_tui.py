@@ -5,7 +5,6 @@ Docker TUI - Complete Textual Implementation
 Full-featured Docker TUI using Textual framework with all original features.
 """
 import asyncio
-import atexit
 import datetime
 import docker
 import json
@@ -42,10 +41,8 @@ from ..utils.utils import (
     build_image_repo_by_digest,
 )
 from ..utils.tmux import (
-    disable_pane_mouse,
     is_tmux,
     send_mouse_enable_sequences,
-    unset_pane_mouse,
 )
 from ..utils.config import (
     load_config,
@@ -832,7 +829,6 @@ class DockerTUIApp(App):
     def __init__(self):
         super().__init__()
         self._in_tmux = is_tmux()
-        self._tmux_mouse_managed = False
         self.docker_client = None
         self.containers = []
         self.filtered_containers = []
@@ -1141,16 +1137,7 @@ class DockerTUIApp(App):
         table.focus()
 
         if self._in_tmux:
-            if disable_pane_mouse():
-                self._tmux_mouse_managed = True
-                atexit.register(self._restore_tmux_mouse)
             send_mouse_enable_sequences()
-
-    def _restore_tmux_mouse(self) -> None:
-        """Remove per-pane mouse override if we set it (idempotent; safe from atexit and unmount)."""
-        if self._tmux_mouse_managed:
-            unset_pane_mouse()
-            self._tmux_mouse_managed = False
 
     def on_resize(self, event: events.Resize) -> None:  # type: ignore[override]
         """Recompute and apply column widths on terminal resize."""
@@ -2090,9 +2077,6 @@ class DockerTUIApp(App):
                 except Exception:
                     pass
 
-                if self._tmux_mouse_managed:
-                    unset_pane_mouse()
-
                 sys.stdout.write("\033c")
                 sys.stdout.write("\033[?1000l")
                 sys.stdout.write("\033[?1002l")
@@ -2139,9 +2123,6 @@ class DockerTUIApp(App):
                             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
                         except Exception:
                             pass
-                    if self._tmux_mouse_managed:
-                        disable_pane_mouse()
-                        send_mouse_enable_sequences()
                     sys.stdout.write("\033[2J\033[H")
                     sys.stdout.write("\033[0m")
                     sys.stdout.flush()
@@ -2361,7 +2342,6 @@ class DockerTUIApp(App):
     
     async def on_unmount(self) -> None:
         """Cleanup when app closes."""
-        self._restore_tmux_mouse()
         if self.refresh_timer:
             self.refresh_timer.stop()
         if self._stats_table_debounce_task and not self._stats_table_debounce_task.done():
