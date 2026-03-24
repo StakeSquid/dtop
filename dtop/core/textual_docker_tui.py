@@ -758,6 +758,9 @@ class DockerTUIApp(App):
     
     #container-table {
         height: 1fr;
+        /* Match RichLog: overflow-y scroll keeps show_vertical_scrollbar true so Textual
+           runs wheel scrolling (allow_vertical_scroll stays enabled). */
+        overflow-y: scroll;
         scrollbar-background: $panel;
         scrollbar-corner-color: $panel;
     }
