@@ -1369,7 +1369,13 @@ class LogViewScreen(Screen):
         """Disable follow when user scrolls up with mouse."""
         self.is_following = False
         self.update_stats()
-    
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        """Disable follow when user scrolls down with mouse (unless at bottom)."""
+        if not self._is_view_at_bottom():
+            self.is_following = False
+            self.update_stats()
+
     def action_export_logs(self) -> None:
         """Export logs with dialog."""
         def handle_result(result):
